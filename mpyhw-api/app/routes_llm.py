@@ -41,7 +41,7 @@ from app.prompt_assembly import (  # noqa: F401
 from app.sse_translate import (  # noqa: F401
     DeepSeekProvider, OpenAIProvider, UpstreamError, _PAYLOAD_VALIDATORS,
     _call_deepseek_plain, _deepseek_payload, _deepseek_tools,
-    _noncanonical_tools, _open_deepseek_stream, _payload_violation, _sse,
+    _noncanonical_tools, _open_deepseek_stream, _open_upstream, _payload_violation, _sse,
     _stub_sse, _translate_deepseek_stream, get_llm_provider,
     llm_provider_configured,
 )
