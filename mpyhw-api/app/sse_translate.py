@@ -145,11 +145,14 @@ def _stub_sse(meter=None):
 
 
 class UpstreamError(Exception):
-    def __init__(self, status: int):
+    def __init__(self, status: int, kind: str | None = None):
         self.status = status
+        # None on a bare/legacy raise (e.g. a monkeypatched test) -- callers that key
+        # behavior off kind must fall back to status in that case.
+        self.kind = kind
 
 
-from app.llm_providers import DeepSeekProvider, OpenAIProvider, _log_upstream_rejection, get_llm_provider, is_partial_rollout_rejection, llm_provider_configured, read_upstream_body  # noqa: F401 - providers live there (line budget); re-exported onward via routes_llm
+from app.llm_providers import DeepSeekProvider, OpenAIProvider, _log_upstream_rejection, classify_upstream_rejection, get_llm_provider, is_partial_rollout_rejection, llm_provider_configured, read_upstream_body  # noqa: F401 - providers live there (line budget); re-exported onward via routes_llm
 
 
 def _deepseek_payload(body: dict[str, Any], *, provider=None) -> dict[str, Any]:
@@ -226,8 +229,11 @@ def _open_deepseek_stream(body: dict[str, Any], api_key: str, *, provider=None):
     # leave this retry unable to do the job it exists for. Five attempts put run survival above 90%.
     # Cheap to spend: these rejections come back in under two seconds and never reach the provider's
     # model, so the ceiling is a few seconds inside to_thread, off the event loop.
-    OUTAGE_OPEN_ATTEMPTS = 2
-    PARTIAL_ROLLOUT_OPEN_ATTEMPTS = 5
+    #
+    # A QUOTA rejection gets the default budget of 1, not one of the entries below: it returns in
+    # under two seconds with a refund, but it is not transient -- the account stays dry until
+    # someone tops it up, so a second attempt only burns a call the first one already answered.
+    OPEN_RETRY_BUDGET = {"provider_rollout": 5, "outage": 2, "rate_limited": 2}
     attempt = 0
     while True:
         try:
@@ -238,26 +244,22 @@ def _open_deepseek_stream(body: dict[str, Any], api_key: str, *, provider=None):
             # NOT named `body`: that is this function's payload parameter, and shadowing it here
             # would mean a future edit that rebuilds the request per attempt POSTs the error text.
             err_body = read_upstream_body(error)
-            if is_partial_rollout_rejection(error.code, err_body):
-                budget = PARTIAL_ROLLOUT_OPEN_ATTEMPTS
-            elif _R()._is_outage_status(error.code):
-                budget = OUTAGE_OPEN_ATTEMPTS
-            else:
-                budget = 1  # a badly formed request: re-sending it burns a call and delays the error
+            kind = classify_upstream_rejection(error.code, err_body)
+            budget = OPEN_RETRY_BUDGET.get(kind, 1)
             attempt += 1
             if attempt < budget:
                 logger.warning("llm upstream open retry", extra={"status": error.code, "attempt": attempt})
                 time.sleep(0.5)
                 continue
             _log_upstream_rejection(error, err_body)
-            raise UpstreamError(error.code)
+            raise UpstreamError(error.code, kind=kind)
         except urllib.error.URLError:
             attempt += 1
-            if attempt < OUTAGE_OPEN_ATTEMPTS:
+            if attempt < OPEN_RETRY_BUDGET["outage"]:
                 logger.warning("llm upstream open retry", extra={"status": 0, "attempt": attempt})
                 time.sleep(0.5)
                 continue
-            raise UpstreamError(0)
+            raise UpstreamError(0, kind="outage")
 
 
 def _translate_deepseek_stream(upstream: Iterable[bytes], meter=None, on_interrupt=None):

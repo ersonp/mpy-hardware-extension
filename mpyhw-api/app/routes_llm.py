@@ -272,11 +272,20 @@ async def llm_messages(request: Request, user: dict = Depends(get_current_user))
         try:
             upstream = await to_thread(provider.open_stream, body)
         except UpstreamError as error:
-            # Only a transient outage (timeout/5xx/429) trips the breaker; a 4xx
-            # (bad key/request) is a config error that retrying won't fix.
-            if breaker_enabled and _is_outage_status(error.status):
+            # Only a transient outage or a rate-limit storm trips the breaker; a quota
+            # rejection is not transient (the account stays dry until topped up) and a 4xx
+            # config/auth error is not the upstream's fault, so neither should open it and
+            # hide the actionable per-request kind behind a generic breaker 503. A bare
+            # UpstreamError with no kind (e.g. a monkeypatched test) falls back to the old
+            # status-based check.
+            trips_breaker = (
+                error.kind in ("outage", "rate_limited")
+                if error.kind is not None
+                else _is_outage_status(error.status)
+            )
+            if breaker_enabled and trips_breaker:
                 _deepseek_breaker.record_failure()
-            logger.warning("llm upstream error", extra={"status": error.status})
+            logger.warning("llm upstream error", extra={"status": error.status, "kind": error.kind})
             credit_store.refund(user, 1)
             analytics.record_llm_turn(
                 trace_id=body.get("trace_id"),
@@ -287,10 +296,13 @@ async def llm_messages(request: Request, user: dict = Depends(get_current_user))
                 total_tokens=None,
                 credits_charged=0,
                 status="error",
-                error_kind="upstream_error",
+                error_kind=f"upstream_error:{error.kind}" if error.kind else "upstream_error",
             )
             llm_sessions.release(session_id, "upstream_error")
-            raise HTTPException(status_code=502, detail={"error": "llm_upstream_error", "status": error.status})
+            raise HTTPException(
+                status_code=502,
+                detail={"error": "llm_upstream_error", "status": error.status, "kind": error.kind},
+            )
         if breaker_enabled:
             _deepseek_breaker.record_success()
         def on_interrupt(error: BaseException) -> None:
