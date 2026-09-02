@@ -195,8 +195,9 @@ def _deepseek_payload(body: dict[str, Any], *, provider=None) -> dict[str, Any]:
 
 # Retry only the connect / pre-first-byte phase: this returns BEFORE any response byte is
 # yielded and before the turn is metered, so a retry can never double-charge. A mid-stream
-# drop is handled downstream and is NOT retried. Runs inside to_thread (both callers), so the
-# blocking sleep is off the event loop.
+# drop is handled downstream and is NOT retried. The blocking sleep is off the event loop
+# either way: to_thread for the streaming open, the sync route's own threadpool for the
+# plain call (_call_deepseek_plain's only production caller, web_recommend, is a sync def).
 #
 # An outage is all-or-nothing, so a second attempt is either enough or hopeless. A PARTIAL
 # ROLLOUT is different in kind: it rejects a fixed FRACTION of calls, so the budget has to beat
@@ -512,7 +513,10 @@ def _call_deepseek_plain(
     prefix). Returns (text, usage). Raises UpstreamError on connect failure.
 
     timeout defaults to 120s for codegen; the anonymous web-recommend path passes a
-    short value so a hung connection can't hold a worker for two minutes.
+    short value so a hung connection can't hold a worker for two minutes. The open
+    is retried per _open_upstream's per-kind budget, so the real worst case is that
+    timeout times the budget (5 for a provider_rollout run of bad luck) plus the
+    inter-attempt sleep -- still well under two minutes for either caller's timeout.
 
     response_format is optional and only sent when provided (the web-recommend path passes
     {"type": "json_object"} for JSON mode); codegen callers omit it and are unaffected.

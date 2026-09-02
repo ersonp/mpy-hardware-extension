@@ -1208,6 +1208,36 @@ def test_llm_messages_quota_kind_reports_and_does_not_open_breaker(monkeypatch):
         _deepseek_breaker.reset()
 
 
+@pytest.mark.parametrize("kind,status", [("rate_limited", 429), ("outage", 500)])
+def test_llm_messages_transient_kinds_still_open_the_breaker(monkeypatch, kind, status):
+    # The mirror of the quota test above: excluding quota from the breaker gate must not
+    # accidentally exclude the kinds that ARE supposed to trip it. A real rate-limit storm
+    # or outage still has to open the breaker so the stampede protection keeps working.
+    # status pairs each kind with a status classify_upstream_rejection actually produces
+    # it from (429 -> rate_limited, 5xx -> outage), so this test alone -- not just its
+    # quota sibling -- catches a mutant that deletes the kind branch and falls back to
+    # _is_outage_status(error.status) for everything.
+    from app.routes_llm import UpstreamError, _deepseek_breaker
+
+    monkeypatch.delenv("MPYHW_LLM_STUB", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "app.routes_llm._open_deepseek_stream",
+        lambda _body, _api_key: (_ for _ in ()).throw(UpstreamError(status, kind=kind)),
+    )
+    _deepseek_breaker.reset()
+    try:
+        for _ in range(5):
+            response = client.post(
+                "/v1/llm/messages",
+                json={"messages": [{"role": "user", "content": "blink an ESP32 LED"}], "tools": [{"name": "device_command"}]},
+            )
+            assert response.status_code == 502
+        assert _deepseek_breaker.is_open(), f"5 {kind} rejections in a row must open the breaker"
+    finally:
+        _deepseek_breaker.reset()
+
+
 def test_llm_messages_kind_none_falls_back_to_status_for_the_breaker(monkeypatch):
     # A monkeypatched test (or an old code path) that raises a bare UpstreamError has no kind.
     # The breaker gate must fall back to the pre-existing status check rather than treating an
