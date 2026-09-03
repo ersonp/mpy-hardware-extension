@@ -3039,15 +3039,23 @@ test("restore_session replays the durable activity feed: summaries + INERT promp
     await writeSessionSnapshot(sessionDir, snap);
     posted.length = 0; raw.length = 0;
     await handler({ type: "restore_session", id: sid });
-    // Atomicity itself (the actual fix): the whole burst — reset, feed, tabs, flows, terminal — must
-    // be ONE real postMessage call, so the webview processes it in a single synchronous task and a
-    // Generate click can never land between two of its parts. Only the session_reset boundary (#2)
-    // and the one restore_replay envelope are real top-level posts; artifacts_index/credits stragglers
-    // are asserted to stay separate elsewhere.
-    const replayPosts = raw.filter((m) => m.type === "restore_replay");
-    assert.equal(replayPosts.length, 1, "the whole burst is ONE restore_replay message, not one postMessage per line");
-    assert.ok(!raw.some((m) => ["restore_reset", "restore_user", "restore_line", "restore_prompt", "restore_done"].includes(m.type)), "none of the bundled types are posted as their own top-level message");
+    // Atomicity itself (the actual fix): the whole burst — reset, the generation boundary, feed,
+    // tabs, flows, terminal — must be ONE real postMessage call, so the webview processes it in a
+    // single synchronous task and a Generate click can never land between two of its parts. Pinned
+    // with a full deepEqual (not a blocklist of the types known today) so a partial revert that
+    // re-splits any ONE piece back into its own postMessage — restore_reset, session_reset,
+    // manifest_updated, optional_flows, whatever — fails this, not just the types named up front.
+    // artifacts_index is the one legitimate straggler (the new run's own request_artifacts overwrites
+    // it either way); this session has no vscode.authentication, so refreshCredits posts nothing.
+    assert.deepEqual(raw.map((m) => m.type), ["restore_replay", "artifacts_index"], "the whole burst is ONE restore_replay message, not one postMessage per piece");
     assert.ok(posted.some((m) => m.type === "restore_reset"), "clears the view before replay");
+    // This is the branch that matters most for defect 2 (#2): it is the only one that re-offers
+    // optional-flow buttons (a snapshot restore, unlike a view-only one, seeds optionalNextPhases), so
+    // it is the only branch from which a startPhase() run can reach the controller with NO intervening
+    // start() call. Pin both presence AND position: the boundary must be in THIS bundle, right after
+    // restore_reset, not merely present somewhere or deferred to whatever build follows.
+    assert.equal(posted[0]?.type, "restore_reset", "the feed is cleared first");
+    assert.equal(posted[1]?.type, "session_reset", "the restore's own generation boundary follows immediately, in the same bundle");
     // The snapshot path adopts the restored session's id, so the run that follows IS this session
     // continuing. It must NOT carry viewOnly, or the webview would wipe a feed the user is adding to.
     assert.ok(!posted.some((m) => m.type === "restore_reset" && m.viewOnly), "a resumable restore is not flagged read-only");
@@ -3127,7 +3135,7 @@ test("restore_session replays the RICH narration in file order via ungated messa
 test("restore_session on a NO-snapshot dir replays the transcript read-only: feed, tabs (last-of-each artifact), terminal — never opens the raw log", async () => {
   const ws = mkdtempSync(join(tmpdir(), "mpyhw-restore-"));
   try {
-    const { handler, posted, infos, commands } = restorePanel(ws);
+    const { handler, posted, raw, infos, commands } = restorePanel(ws);
     const sid = "session-viewonly-1";
     const sessionDir = join(ws, ".mpyhw", "sessions", sid);
     mkdirSync(sessionDir, { recursive: true });
@@ -3148,17 +3156,23 @@ test("restore_session on a NO-snapshot dir replays the transcript read-only: fee
       { type: "session_finished", terminal: "complete" },
     ].map((e) => JSON.stringify(e)).join("\n") + "\n";
     writeFileSync(join(sessionDir, "session.jsonl"), jsonl);
-    posted.length = 0; infos.length = 0;
+    posted.length = 0; raw.length = 0; infos.length = 0;
     await handler({ type: "restore_session", id: sid });
-    // seedFromSnapshot's own generation boundary (defect 2: it must not be deferred to the next
-    // build, or the quota bar freezes until the user hits Restart) lands before the replay itself.
-    assert.equal(posted[0]?.type, "session_reset", "the restore posts its own generation boundary");
+    // Atomicity itself (this branch's half of work item #1): the whole burst is ONE restore_replay
+    // message, not one postMessage per line. Pinned with a full sequence, not a type blocklist, so a
+    // partial revert of ANY piece (not just the ones named here) fails this. artifacts_index is the
+    // one legitimate straggler; this view-only branch never calls refreshCredits.
+    assert.deepEqual(raw.map((m) => m.type), ["restore_replay", "artifacts_index"], "the whole burst is ONE restore_replay message, not one postMessage per piece");
     // Feed replays exactly as the rich (snapshot) path does — same mapRestoreEvent, same messages.
-    assert.equal(posted[1]?.type, "restore_reset", "the feed is cleared first");
+    assert.equal(posted[0]?.type, "restore_reset", "the feed is cleared first");
     // viewOnly marks the replayed feed as one the next build cannot join (this restore seeds no traceId,
     // so that build gets its own dir). The webview clears the feed on the next request rather than
     // rendering two unrelated sessions as one conversation.
-    assert.equal(posted[1]?.viewOnly, true, "the reset flags the feed as a read-only replay");
+    assert.equal(posted[0]?.viewOnly, true, "the reset flags the feed as a read-only replay");
+    // seedFromSnapshot's generation boundary rides in the SAME bundle, right after restore_reset —
+    // never as its own earlier message, which would be undone by the wipe delivered a moment later
+    // (see the comment on seedFromSnapshot's generation bump for the reordering bug this avoids).
+    assert.equal(posted[1]?.type, "session_reset", "the restore's own generation boundary follows immediately, in the same bundle");
     assert.ok(posted.some((m) => m.type === "restore_user" && /blink an LED/.test(m.text)), "the user's request replays");
     assert.ok(posted.some((m) => m.type === "restore_line" && m.kind === "trace"), "status narration replays");
     assert.ok(posted.some((m) => m.type === "summary" && /main\.py/.test(m.text)), "the phase summary replays");

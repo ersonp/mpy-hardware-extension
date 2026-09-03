@@ -1232,12 +1232,16 @@ export class SessionController {
   }): boolean {
     if (this.abort) return false; // a run owns the state — never clobber a live session
     this.clearSessionState(); // start from a clean session — no residue from a prior run/restore (#28)
-    // A restore is a fresh generation, same as reset(): the webview's clearConversation() (fired by
-    // both restore branches, panel.ts) starts draining stamped session_events until it sees this
-    // echo — without it, every session_event the NEXT build's controller relay posts after a restore
-    // is dropped forever (the quota bar freezes until the user happens to hit Restart).
+    // A restore is a fresh generation, same as reset(). Bump it here, but do NOT post the
+    // session_reset echo from inside this call: the caller (panel.ts) still has to post the
+    // restore_reset that WIPES the webview's feed (clearConversation() -> markSessionEventsStale()),
+    // and that wipe is delivered LATER, bundled into the one restore_replay message the caller builds
+    // after this returns. Posting the echo here would arrive BEFORE that wipe and get immediately
+    // undone by it, leaving the drain open regardless (verified: a credits frame from a run that
+    // never calls start() again, e.g. a restored session's own optional-flow, was silently dropped).
+    // The caller reads getGeneration() and folds {type:"session_reset"} into the SAME bundle, after
+    // the nested restore_reset, so the two can never be reordered by delivery.
     this.generation++;
-    this.deps.postMessage({ type: "session_reset", generation: this.generation });
     this.state = seed.state;
     this.boardId = seed.boardId ?? null;
     this.traceId = seed.traceId || null;
@@ -1258,6 +1262,13 @@ export class SessionController {
     if (Array.isArray(seed.optionalNextPhases)) this.optionalNextPhases = seed.optionalNextPhases;
     if (seed.generatePhaseComplete !== undefined) this.latestGeneratePhaseComplete = seed.generatePhaseComplete;
     return true;
+  }
+
+  // The current generation, for a caller (panel.ts's doRestoreFromDir) that needs to fold a
+  // session_reset boundary into a bundle it builds AFTER calling seedFromSnapshot — see the
+  // comment on the generation bump above for why seedFromSnapshot cannot post it itself.
+  getGeneration(): number {
+    return this.generation;
   }
 
   // Whether this session has any restorable state to snapshot (drives the sv_nothing branch).

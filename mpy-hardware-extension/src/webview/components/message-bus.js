@@ -50,17 +50,25 @@
         // viewOnly marks a session with no saved snapshot: the feed becomes a read-only replay, and the
         // next Generate wipes it rather than appending a different session's run underneath it.
         if (msg.type === "restore_reset") { clearConversation(); if (msg.viewOnly) viewOnlyReplay = true; }
-        // The whole restore burst (reset + feed + tabs + flows + terminal) arrives as ONE message, so
-        // it renders in a single synchronous task: a Generate click cannot land between two of its
-        // parts (a click used to land mid-delivery and render a stale tail into the new run). The
-        // mirror direction — Generate clicked before this message even arrives — is closed by dropping
-        // the whole bundle once a live run has already started: restore_replay is never emitted during
-        // a live run, so gating the OUTER envelope on `running` is safe here, unlike the shared live
-        // types (summary/serial_output/manifest_updated/...) nested inside it, which must stay ungated
-        // for their own live use and so cannot each carry this check individually.
+        // The whole restore burst (reset + the generation boundary + feed + tabs + flows + terminal)
+        // arrives as ONE message, and always takes this branch and returns. It renders in a single
+        // synchronous task: a Generate click cannot land between two of its parts (a click used to land
+        // mid-delivery and render a stale tail into the new run). The mirror direction — Generate
+        // clicked before this message even arrives — is narrowed by dropping the whole bundle once
+        // `running` is already true: restore_replay is never emitted during a live run, so gating the
+        // OUTER envelope on it is safe here, unlike the shared live types (summary/serial_output/
+        // manifest_updated/...) nested inside it, which must stay ungated for their own live use and so
+        // cannot each carry this check individually. Narrowed, not closed: `running` is only set for a
+        // Generate- or Retry-started run (setRunning(true) in HomeWorkbench.js and, for Retry, in
+        // ActivityTimeline.js's retry card) — an optional-flow/gen-driver/MaixPy run dispatched without
+        // going through either leaves it false, so a stale envelope racing ONE of those is not caught
+        // here (a pre-existing, narrower window than the one this fix closes; see /scope.md's
+        // Generate-click race).
+        // Isolated per nested message: one throwing entry (a shape no producer emits today, but the
+        // bundle's contents are still host-authored data) must not truncate the rest of the burst.
         if (msg.type === "restore_replay") {
           if (running) return;
-          for (const nested of msg.messages || []) handleHostMessage(nested);
+          for (const nested of msg.messages || []) { try { handleHostMessage(nested); } catch (e) { console.error("restore_replay: nested message failed", nested && nested.type, e); } }
           return;
         }
         // Rich feed replay (Stage 1): the host maps DURABLE transcript events to these ungated messages, so

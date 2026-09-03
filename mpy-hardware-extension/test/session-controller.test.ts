@@ -105,10 +105,12 @@ test("a reset does not leak the recommend board_selection_mode into the next bui
 });
 
 test("a restore followed by a build re-affirms the generation boundary — a stamped session_event is not dropped (defect: the quota bar froze after any restore)", async () => {
-  // Mirrors panel.ts's doRestoreFromDir: a restore (either branch) calls seedFromSnapshot(), which
-  // must post its OWN boundary directly — the webview's clearConversation() (fired for every
-  // restore) starts draining stamped session_events until it sees this echo, and nothing else ends
-  // that drain for a session that is only ever viewed, never built on.
+  // Mirrors panel.ts's doRestoreFromDir: a restore bumps the generation via seedFromSnapshot(), but
+  // does NOT post the session_reset echo itself — the caller has to fold {type:"session_reset",
+  // generation: controller.getGeneration()} into the SAME bundle as the restore_reset that wipes the
+  // webview's feed, positioned after it, or the echo (delivered first, on its own) would be
+  // immediately undone by the wipe (delivered second) re-arming the very drain it just closed. See
+  // the comment on seedFromSnapshot's generation bump for the reordering bug this contract avoids.
   const posted: any[] = [];
   const controller = new SessionController({
     postMessage: (m: any) => posted.push(m),
@@ -120,11 +122,12 @@ test("a restore followed by a build re-affirms the generation boundary — a sta
 
   const seeded = controller.seedFromSnapshot({});
   assert.ok(seeded, "a view-only restore seeds cleanly");
-  assert.ok(posted.some((m) => m.type === "session_reset"), "the restore itself posts a fresh generation boundary, not deferred to whatever build follows");
+  assert.ok(!posted.some((m) => m.type === "session_reset"), "seedFromSnapshot does not post the boundary itself — that is the caller's job, bundled with its own wipe");
+  assert.equal(controller.getGeneration(), 1, "the restore bumps the generation the caller reads to build its bundle");
 
   // The build that follows a restore (e.g. Generate clicked on a view-only replay) must ALSO
   // re-affirm the boundary: the webview's Generate-side wipe (HomeWorkbench.js, viewOnlyReplay) is a
-  // SECOND clearConversation() call that re-arms the very drain the restore's own boundary just
+  // SECOND clearConversation() call that re-arms the drain the restore's own bundled boundary already
   // closed, and nothing but a fresh boundary from THIS build ends it again.
   posted.length = 0;
   await controller.start({ intent: "blink an LED", boardId: "esp32" });

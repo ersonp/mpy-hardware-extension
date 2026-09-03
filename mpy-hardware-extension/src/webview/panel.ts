@@ -1090,7 +1090,19 @@ function wireWebview(vscode: any, webview: any, extensionUri: any, deps: PanelDe
         // optional_flows, then restore_done — each a separate postMessage, so a Generate click could
         // land between any two of them and render a stale tail into the new run). artifacts_index stays
         // a separate straggler (the new run's own request_artifacts overwrites it either way).
-        const replay: any[] = [{ type: "restore_reset", viewOnly: true }];
+        //
+        // The generation boundary seedFromSnapshot() just bumped rides IN this same bundle, right
+        // after restore_reset, rather than as its own earlier postMessage: posted separately (and
+        // therefore delivered first), the webview's clearConversation() (called by the nested
+        // restore_reset a moment later) would immediately re-arm the very drain this boundary was
+        // meant to close, leaving it open for any run that reaches the controller without another
+        // start() in between (e.g. an optional-flow run dispatched straight off a restored session).
+        // Bundled after restore_reset, both land in the same synchronous task with the wipe first and
+        // the boundary last, so the echo always wins.
+        const replay: any[] = [
+          { type: "restore_reset", viewOnly: true },
+          { type: "session_reset", generation: controller.getGeneration() },
+        ];
         replay.push(...replaySessionFeed(events));
         replay.push(...replaySessionTabs(events));
         // Wiring tab: post [] unconditionally, same as the snapshot path below — the flow-offer entries
@@ -1137,7 +1149,15 @@ function wireWebview(vscode: any, webview: any, extensionUri: any, deps: PanelDe
       // above — a Generate click cannot land between two of its parts. artifacts_index and the live credit
       // refetch stay separate stragglers (the new run's own request_artifacts overwrites the former; the
       // latter is a best-effort network round trip with no ordering requirement against the replay).
-      const replay: any[] = [{ type: "restore_reset" }];
+      //
+      // The generation boundary rides in this same bundle, right after restore_reset, same reason as the
+      // view-only branch above: posted as its own earlier message, the nested restore_reset's
+      // clearConversation() would re-arm the drain it was meant to close before this session's next run
+      // (start(), retry(), or an optional-flow startPhase()) ever reaches the controller.
+      const replay: any[] = [
+        { type: "restore_reset" },
+        { type: "session_reset", generation: controller.getGeneration() },
+      ];
       replay.push(...replaySessionFeed(readSessionEvents(sessionDir) ?? [])); // no jsonl (rare, pre-dates it) — tabs still restore from the snapshot below
       if (snap.manifest) replay.push({ type: "manifest_updated", manifest: snap.manifest });
       // Diagram tab: an authored diagram wins; otherwise derive it from the manifest exactly as a live
