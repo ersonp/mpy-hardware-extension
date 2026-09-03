@@ -669,6 +669,47 @@ test("a board picked during a view-only replay survives the wipe", async () => {
   assert.equal(starts[1].pre_selected_board.id, "esp32-s3-devkitc");
 });
 
+// The mirror direction of the "click lands mid-burst" defect: here Generate is clicked BEFORE the
+// restore burst even arrives (it was already in flight host-side when the click fired). The whole
+// burst now posts as one restore_replay envelope, so it can never be interleaved once delivery
+// starts — but delivery itself is still async relative to a click, so the envelope is gated on
+// `running` at receipt: a stale one arriving after a live run has started must be dropped WHOLE, not
+// just have its embedded restore_reset skipped, or the embedded restore_user/restore_done would
+// still render into the live feed and viewOnlyReplay would still get armed under a live run (arming
+// a spurious wipe on the next idle Generate — the second half of the reported bug).
+test("a restore_replay that arrives after Generate was already clicked is dropped whole (mirror direction)", async () => {
+  const posted: any[] = [];
+  const dom = await loadWebview(posted);
+  const { document } = dom.window;
+
+  (document.getElementById("intent") as HTMLTextAreaElement).value = "blink an LED";
+  (document.getElementById("generate") as HTMLButtonElement).click();
+  assert.match(document.getElementById("activity")!.textContent!, /blink an LED/, "the live run's own message is in the feed");
+
+  // A restore that was already in flight when the click fired, delivered late.
+  post(dom, {
+    type: "restore_replay",
+    viewOnly: true,
+    messages: [
+      { type: "restore_reset", viewOnly: true },
+      { type: "restore_user", text: "an old replayed session" },
+      { type: "restore_done", terminal: "complete" },
+    ],
+  });
+
+  const activity = document.getElementById("activity")!.textContent!;
+  assert.match(activity, /blink an LED/, "the live run's feed survives the stale restore");
+  assert.doesNotMatch(activity, /an old replayed session/, "the stale replay never renders");
+  assert.equal((document.getElementById("generate") as HTMLButtonElement).classList.contains("stop"), true, "the live run itself is untouched (still running)");
+
+  // The flag must not have armed either: an idle Generate right after must not wipe THIS
+  // conversation as if it were a leftover view-only replay.
+  post(dom, { type: "session_done", terminal: "generated" });
+  (document.getElementById("intent") as HTMLTextAreaElement).value = "a follow-up note";
+  (document.getElementById("generate") as HTMLButtonElement).click();
+  assert.match(document.getElementById("activity")!.textContent!, /blink an LED/, "the earlier live turn is not wiped by a spuriously-armed replay flag");
+});
+
 test("session-restore feed rehydration: restore_done appends a terminal line, restore_reset clears", async () => {
   const dom = await loadWebview([]);
   const { document } = dom.window;

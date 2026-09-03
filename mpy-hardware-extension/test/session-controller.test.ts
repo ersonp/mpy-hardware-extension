@@ -104,6 +104,38 @@ test("a reset does not leak the recommend board_selection_mode into the next bui
   assert.equal(inputs[1].boardSelectionMode, undefined, "a reset build must not inherit the stale recommend flag");
 });
 
+test("a restore followed by a build re-affirms the generation boundary — a stamped session_event is not dropped (defect: the quota bar froze after any restore)", async () => {
+  // Mirrors panel.ts's doRestoreFromDir: a restore (either branch) calls seedFromSnapshot(), which
+  // must post its OWN boundary directly — the webview's clearConversation() (fired for every
+  // restore) starts draining stamped session_events until it sees this echo, and nothing else ends
+  // that drain for a session that is only ever viewed, never built on.
+  const posted: any[] = [];
+  const controller = new SessionController({
+    postMessage: (m: any) => posted.push(m),
+    loop: async ({ onEvent }: any) => {
+      onEvent({ type: "credits", remaining: 41, dailyGrant: 100, resetsAt: "2026-07-26T00:00:00Z" });
+      return { terminal: "complete" };
+    },
+  });
+
+  const seeded = controller.seedFromSnapshot({});
+  assert.ok(seeded, "a view-only restore seeds cleanly");
+  assert.ok(posted.some((m) => m.type === "session_reset"), "the restore itself posts a fresh generation boundary, not deferred to whatever build follows");
+
+  // The build that follows a restore (e.g. Generate clicked on a view-only replay) must ALSO
+  // re-affirm the boundary: the webview's Generate-side wipe (HomeWorkbench.js, viewOnlyReplay) is a
+  // SECOND clearConversation() call that re-arms the very drain the restore's own boundary just
+  // closed, and nothing but a fresh boundary from THIS build ends it again.
+  posted.length = 0;
+  await controller.start({ intent: "blink an LED", boardId: "esp32" });
+
+  const resetAt = posted.findIndex((m) => m.type === "session_reset");
+  const creditsAt = posted.findIndex((m) => m.type === "session_event" && m.event?.kind === "credits");
+  assert.ok(resetAt !== -1, "the build establishes its own boundary");
+  assert.ok(creditsAt !== -1, "the build's stamped credits frame is posted");
+  assert.ok(resetAt < creditsAt, "the boundary lands before the stamped frame it must un-drain for — otherwise the frame arrives while still draining and is silently dropped");
+});
+
 test("a reset clears the artifact accumulators so a new session does not surface the prior session's artifacts", async () => {
   // #28 F6: reset() sets boardId=null, so the next start()'s board-change clear is skipped
   // (same trap as boardSelectionMode above). Without an explicit clear, producedPaths and
