@@ -2839,9 +2839,15 @@ test("welcome telemetry: a rejected POST is swallowed — the click's primary ac
 });
 
 function restorePanel(ws: string) {
-  const posted: any[] = []; const infos: string[] = []; const errors: string[] = []; const commands: Array<{ cmd: string; path?: string }> = [];
+  const posted: any[] = []; const raw: any[] = []; const infos: string[] = []; const errors: string[] = []; const commands: Array<{ cmd: string; path?: string }> = [];
   let handler: ((m: any) => Promise<void>) | undefined;
-  const panel = { webview: { cspSource: "", html: "", postMessage: (m: any) => posted.push(m), onDidReceiveMessage: (n: any) => { handler = n; } } };
+  // The restore burst now arrives as ONE atomic restore_replay envelope (fix: a Generate click
+  // landing mid-delivery used to render a stale tail into the new run — see /scope.md). `raw`
+  // keeps every actual postMessage call as-is (for asserting the atomicity itself); `posted`
+  // unwraps the envelope so the content/order tests below, written against the pre-fix
+  // per-message wire format, still see the same flat sequence.
+  const postMessage = (m: any) => { raw.push(m); if (m && m.type === "restore_replay") posted.push(...(m.messages ?? [])); else posted.push(m); };
+  const panel = { webview: { cspSource: "", html: "", postMessage, onDidReceiveMessage: (n: any) => { handler = n; } } };
   const vscode = {
     ViewColumn: { One: 1 }, workspace: { workspaceFolders: [{ uri: { fsPath: ws } }] },
     window: { createWebviewPanel: () => panel, showInformationMessage: async (m: string) => { infos.push(m); }, showErrorMessage: async (m: string) => { errors.push(m); } },
@@ -2849,7 +2855,7 @@ function restorePanel(ws: string) {
     Uri: { file: (p: string) => ({ fsPath: p }) },
   };
   createPanel(vscode, {}, { apiBaseUrl: "http://api.test", fetchImpl: async () => jsonResponse({}) as any });
-  return { handler: handler!, posted, infos, errors, commands };
+  return { handler: handler!, posted, raw, infos, errors, commands };
 }
 
 test("restore_session rehydrates the tabs from a saved snapshot (wiring/diagram/sha-verified code) and confirms", async () => {
@@ -3008,7 +3014,7 @@ test("restore_session refetches the LIVE credit balance (the snapshot's credits 
 test("restore_session replays the durable activity feed: summaries + INERT prompt history + terminal (D4)", async () => {
   const ws = mkdtempSync(join(tmpdir(), "mpyhw-restore-"));
   try {
-    const { handler, posted } = restorePanel(ws);
+    const { handler, posted, raw } = restorePanel(ws);
     const sid = "session-feed-1";
     const sessionDir = join(ws, ".mpyhw", "sessions", sid);
     mkdirSync(sessionDir, { recursive: true });
@@ -3028,8 +3034,16 @@ test("restore_session replays the durable activity feed: summaries + INERT promp
       preferences: undefined, manifest: {}, diagram: null, credits: null, diagnostics: {}, optionalNextPhases: [], generatePhaseComplete: null, artifacts: [], git: null,
     });
     await writeSessionSnapshot(sessionDir, snap);
-    posted.length = 0;
+    posted.length = 0; raw.length = 0;
     await handler({ type: "restore_session", id: sid });
+    // Atomicity itself (the actual fix): the whole burst — reset, feed, tabs, flows, terminal — must
+    // be ONE real postMessage call, so the webview processes it in a single synchronous task and a
+    // Generate click can never land between two of its parts. Only the session_reset boundary (#2)
+    // and the one restore_replay envelope are real top-level posts; artifacts_index/credits stragglers
+    // are asserted to stay separate elsewhere.
+    const replayPosts = raw.filter((m) => m.type === "restore_replay");
+    assert.equal(replayPosts.length, 1, "the whole burst is ONE restore_replay message, not one postMessage per line");
+    assert.ok(!raw.some((m) => ["restore_reset", "restore_user", "restore_line", "restore_prompt", "restore_done"].includes(m.type)), "none of the bundled types are posted as their own top-level message");
     assert.ok(posted.some((m) => m.type === "restore_reset"), "clears the view before replay");
     // The snapshot path adopts the restored session's id, so the run that follows IS this session
     // continuing. It must NOT carry viewOnly, or the webview would wipe a feed the user is adding to.

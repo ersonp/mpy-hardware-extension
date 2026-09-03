@@ -15,8 +15,9 @@
         && t !== "cancelled" && t !== "awaiting_user" && t !== "stalled";
 
 
-      window.addEventListener("message", (event) => {
-        const msg = event.data;
+      // Named (not an inline arrow) so restore_replay below can re-enter it once per bundled message —
+      // see that branch for why.
+      function handleHostMessage(msg) {
         if (msg.type === "recipe_imported") { prefillImportedRecipe(msg.payload); }
         if (msg.type === "doctor_results") { renderDoctor(msg.items, msg.seq); }
         if (msg.type === "gen_driver_config") { renderGenDriver(msg.tabs); }
@@ -49,6 +50,19 @@
         // viewOnly marks a session with no saved snapshot: the feed becomes a read-only replay, and the
         // next Generate wipes it rather than appending a different session's run underneath it.
         if (msg.type === "restore_reset") { clearConversation(); if (msg.viewOnly) viewOnlyReplay = true; }
+        // The whole restore burst (reset + feed + tabs + flows + terminal) arrives as ONE message, so
+        // it renders in a single synchronous task: a Generate click cannot land between two of its
+        // parts (a click used to land mid-delivery and render a stale tail into the new run). The
+        // mirror direction — Generate clicked before this message even arrives — is closed by dropping
+        // the whole bundle once a live run has already started: restore_replay is never emitted during
+        // a live run, so gating the OUTER envelope on `running` is safe here, unlike the shared live
+        // types (summary/serial_output/manifest_updated/...) nested inside it, which must stay ungated
+        // for their own live use and so cannot each carry this check individually.
+        if (msg.type === "restore_replay") {
+          if (running) return;
+          for (const nested of msg.messages || []) handleHostMessage(nested);
+          return;
+        }
         // Rich feed replay (Stage 1): the host maps DURABLE transcript events to these ungated messages, so
         // the past run's narration re-renders on restore without touching the live-run gates. A user request
         // renders as its own card; a mapped line renders as a trace line, or an error line (kind:"error").
@@ -291,4 +305,5 @@
           setRunning(false);
           clearPending();
         }
-      });
+      }
+      window.addEventListener("message", (event) => handleHostMessage(event.data));
