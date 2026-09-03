@@ -333,6 +333,7 @@ test("session controller streams loop events and gates deploy via confirmDeploy"
 
   assert.equal(result.terminal, "user_cancelled");
   assert.deepEqual(messages.map((m) => m.type), [
+    "session_reset",
     "trace_event",
     "manifest_updated",
     "diagram_updated",
@@ -883,6 +884,7 @@ test("session controller reports loop crashes to the webview", async () => {
 
   assert.deepEqual(result, { terminal: "session_error", error: "api down" });
   assert.deepEqual(messages, [
+    { type: "session_reset", generation: 0 },
     { type: "session_error", error: "api down" },
     { type: "session_done", terminal: "session_error" },
   ]);

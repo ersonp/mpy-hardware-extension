@@ -66,8 +66,11 @@ test("webview start_session runs API-backed pipeline and renders generated outpu
       "http://api.test/v1/packages/aht20_driver/1.0.0/driver-context",
       "http://api.test/v1/boards/esp32-s3-devkitc-1",
     ]);
-    // manifest_updated now drives a derived diagram_updated (Wiring/Diagram tabs).
-    assert.deepEqual(posted.map((message) => message.type), ["trace_event", "manifest_updated", "diagram_updated", "code_updated", "trace_event", "files_written", "session_done"]);
+    // manifest_updated now drives a derived diagram_updated (Wiring/Diagram tabs). session_reset
+    // leads every start() (defect 2 fix): the generation boundary the webview's restore-triggered
+    // session_event drain needs to end, posted unconditionally so a build after a restore is covered
+    // without the controller having to know a client-side wipe is pending.
+    assert.deepEqual(posted.map((message) => message.type), ["session_reset", "trace_event", "manifest_updated", "diagram_updated", "code_updated", "trace_event", "files_written", "session_done"]);
     assert.equal(posted.at(-1).terminal, "generated");
     assert.match(posted.find((message) => message.type === "code_updated").code, /MPYHW_READY/);
     // Files land under the open workspace (not a fallback), so no "saved here" notice.
@@ -3147,12 +3150,15 @@ test("restore_session on a NO-snapshot dir replays the transcript read-only: fee
     writeFileSync(join(sessionDir, "session.jsonl"), jsonl);
     posted.length = 0; infos.length = 0;
     await handler({ type: "restore_session", id: sid });
+    // seedFromSnapshot's own generation boundary (defect 2: it must not be deferred to the next
+    // build, or the quota bar freezes until the user hits Restart) lands before the replay itself.
+    assert.equal(posted[0]?.type, "session_reset", "the restore posts its own generation boundary");
     // Feed replays exactly as the rich (snapshot) path does — same mapRestoreEvent, same messages.
-    assert.equal(posted[0]?.type, "restore_reset", "the feed is cleared first");
+    assert.equal(posted[1]?.type, "restore_reset", "the feed is cleared first");
     // viewOnly marks the replayed feed as one the next build cannot join (this restore seeds no traceId,
     // so that build gets its own dir). The webview clears the feed on the next request rather than
     // rendering two unrelated sessions as one conversation.
-    assert.equal(posted[0]?.viewOnly, true, "the reset flags the feed as a read-only replay");
+    assert.equal(posted[1]?.viewOnly, true, "the reset flags the feed as a read-only replay");
     assert.ok(posted.some((m) => m.type === "restore_user" && /blink an LED/.test(m.text)), "the user's request replays");
     assert.ok(posted.some((m) => m.type === "restore_line" && m.kind === "trace"), "status narration replays");
     assert.ok(posted.some((m) => m.type === "summary" && /main\.py/.test(m.text)), "the phase summary replays");

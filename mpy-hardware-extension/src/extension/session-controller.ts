@@ -166,6 +166,15 @@ export class SessionController {
       this.deps.postMessage({ type: "session_busy" });
       return { terminal: "session_busy" };
     }
+    // Re-affirm the generation boundary on every fresh build. A restore's own seedFromSnapshot()
+    // below posts one too, but the webview can re-arm its drain AFTER that: a view-only replay's
+    // Generate click wipes the replayed feed client-side (HomeWorkbench.js), which re-sets the same
+    // "drop stamped session_events until the boundary echoes back" flag the restore's own reset had
+    // already cleared. Without this, the fresh build's own credits/session_events are then dropped
+    // forever (the quota bar freezes) until the user happens to hit Restart. Cheap and idempotent —
+    // posting it unconditionally, whether or not a client-side wipe is actually pending, is simpler
+    // and more robust than having the controller track that.
+    this.deps.postMessage({ type: "session_reset", generation: this.generation });
     if (this.boardId !== null && this.boardId !== input.boardId) {
       this.state = undefined;
       this.traceId = null;
@@ -1223,6 +1232,12 @@ export class SessionController {
   }): boolean {
     if (this.abort) return false; // a run owns the state — never clobber a live session
     this.clearSessionState(); // start from a clean session — no residue from a prior run/restore (#28)
+    // A restore is a fresh generation, same as reset(): the webview's clearConversation() (fired by
+    // both restore branches, panel.ts) starts draining stamped session_events until it sees this
+    // echo — without it, every session_event the NEXT build's controller relay posts after a restore
+    // is dropped forever (the quota bar freezes until the user happens to hit Restart).
+    this.generation++;
+    this.deps.postMessage({ type: "session_reset", generation: this.generation });
     this.state = seed.state;
     this.boardId = seed.boardId ?? null;
     this.traceId = seed.traceId || null;
