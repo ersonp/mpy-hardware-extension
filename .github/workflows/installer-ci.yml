@@ -1,0 +1,28 @@
+name: installer-ci
+
+on:
+  push:
+    paths:
+      - "blockless-installer/**"
+  pull_request:
+    paths:
+      - "blockless-installer/**"
+
+jobs:
+  ubuntu:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: blockless-installer
+    steps:
+      - uses: actions/checkout@v4
+      # rustup auto-installs the pinned toolchain (rust-toolchain.toml, incl. the
+      # clippy/rustfmt components) the first time cargo/rustup runs in this dir.
+      - name: show pinned toolchain
+        run: rustup show
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo test
+        run: cargo test --workspace
