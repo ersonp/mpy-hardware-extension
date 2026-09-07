@@ -26,3 +26,19 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: cargo test
         run: cargo test --workspace
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: blockless-installer
+    steps:
+      - uses: actions/checkout@v4
+      - name: show pinned toolchain
+        run: rustup show
+      # pwsh path joins (Join-Path etc.) don't behave the same under a
+      # non-Windows pwsh, so verify-blockless.ps1's parity test
+      # (core/tests/verify_parity_windows.rs, #![cfg(windows)]) only ever
+      # compiles/runs here -- cargo test on ubuntu skips it entirely.
+      - name: cargo test
+        run: cargo test --workspace
