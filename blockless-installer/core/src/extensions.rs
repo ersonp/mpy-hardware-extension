@@ -1,0 +1,702 @@
+//! Step 2: the Blockless extension + its two Marketplace dependencies into
+//! the branded profile. Ports `our_ext_is_bundled_build`/`Test-OurExtBundled`,
+//! `all_ext_current`/`Test-AllExtCurrent`, `install_ext`/`Install-Ext`, and
+//! `step2_extension`/`Step-Extension`.
+//!
+//! Reuses `profile.rs`'s seed-first / window-fallback-second registration
+//! directly; this module only adds extension install/list operations
+//! ([`ExtensionsRunner`], injected for the same reason `profile.rs`'s
+//! `CommandRunner` is: no real `code` CLI in tests).
+
+use crate::profile;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, thiserror::Error)]
+pub enum ExtensionsError {
+    /// Our extension is installed ONLY from the sha256-verified bundled
+    /// VSIX, never the Marketplace: a same-numbered-but-older Marketplace
+    /// build has broken auto-open before (ARCHITECTURE §6) and `verify`
+    /// checks the SETTING we write, not the extension build, so it would
+    /// never catch a silently-wrong install. A missing VSIX fails loudly.
+    #[error("no bundled VSIX for {0}; refusing the stale Marketplace build")]
+    MissingBundledVsix(String),
+    #[error("failed to install {0}")]
+    InstallFailed(String),
+    #[error("extensions missing after install")]
+    MissingAfterInstall,
+    #[error("could not register the profile: {0}")]
+    Profile(#[from] profile::ProfileError),
+    #[error("could not hash the bundled VSIX at {path}: {source}")]
+    VsixHash {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// `code` CLI operations this step needs, injected so it is unit-testable
+/// without a real VS Code binary. Production impl lands with `ops.rs`.
+pub trait ExtensionsRunner {
+    /// `code --profile <profile_name> --list-extensions`. `None` if the CLI
+    /// call itself failed (e.g. the profile doesn't exist yet) -- `has_ext`
+    /// then correctly reads as "not present", never as "present".
+    fn list_extensions(&self, code_cli: &Path, profile_name: &str) -> Option<Vec<String>>;
+    /// `code --profile <profile_name> --install-extension <vsix_or_id>
+    /// --force`. `vsix_or_id` is either a filesystem path (our bundled VSIX)
+    /// or a Marketplace id, indistinguishable at this layer -- the caller
+    /// decides which by construction, never this trait.
+    fn install_extension(&self, code_cli: &Path, profile_name: &str, vsix_or_id: &str) -> bool;
+}
+
+fn has_ext(runner: &dyn ExtensionsRunner, code_cli: &Path, profile_name: &str, id: &str) -> bool {
+    runner
+        .list_extensions(code_cli, profile_name)
+        .unwrap_or_default()
+        .iter()
+        .any(|installed| installed.eq_ignore_ascii_case(id))
+}
+
+/// Present AND installed from the exact VSIX we bundle NOW (matched by the
+/// sha journaled in `state.json`). Presence alone never counts: a
+/// Marketplace build with the same version number but built before
+/// `mpyhw.autoOpenPanel` existed would pass an id/version check yet break
+/// auto-open, and `verify` (which checks the SETTING we write, not the
+/// build) would not catch it.
+fn our_ext_is_bundled_build(
+    runner: &dyn ExtensionsRunner,
+    code_cli: &Path,
+    profile_name: &str,
+    ext_id: &str,
+    vsix_sha256: &str,
+    prior_ext_vsix_sha256: &str,
+) -> bool {
+    has_ext(runner, code_cli, profile_name, ext_id)
+        && !vsix_sha256.is_empty()
+        && prior_ext_vsix_sha256 == vsix_sha256
+}
+
+#[allow(clippy::too_many_arguments)]
+fn all_ext_current(
+    runner: &dyn ExtensionsRunner,
+    code_cli: &Path,
+    profile_name: &str,
+    ext_id: &str,
+    py_ext_id: &str,
+    pylance_id: &str,
+    vsix_sha256: &str,
+    prior_ext_vsix_sha256: &str,
+) -> bool {
+    our_ext_is_bundled_build(
+        runner,
+        code_cli,
+        profile_name,
+        ext_id,
+        vsix_sha256,
+        prior_ext_vsix_sha256,
+    ) && has_ext(runner, code_cli, profile_name, py_ext_id)
+        && has_ext(runner, code_cli, profile_name, pylance_id)
+}
+
+/// Install one id. For `ext_id` (ours): ONLY the bundled, existing VSIX --
+/// never a fallback to the Marketplace. Every other id installs from the
+/// Marketplace directly (the id itself is the argument `code` expects).
+fn install_ext(
+    runner: &dyn ExtensionsRunner,
+    code_cli: &Path,
+    profile_name: &str,
+    id: &str,
+    ext_id: &str,
+    vsix_path: Option<&Path>,
+) -> Result<(), ExtensionsError> {
+    let arg = if id == ext_id {
+        let vsix = vsix_path
+            .filter(|p| p.exists())
+            .ok_or_else(|| ExtensionsError::MissingBundledVsix(id.to_string()))?;
+        vsix.to_string_lossy().into_owned()
+    } else {
+        id.to_string()
+    };
+    if runner.install_extension(code_cli, profile_name, &arg) {
+        Ok(())
+    } else {
+        Err(ExtensionsError::InstallFailed(id.to_string()))
+    }
+}
+
+fn sha256_of_file(path: &Path) -> Result<String, ExtensionsError> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).map_err(|source| ExtensionsError::VsixHash {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionsStepOutcome {
+    /// Whether THIS run created the profile (vs adopting a user's
+    /// pre-existing profile of the same name) -- recorded from the on-disk
+    /// state as it was BEFORE this function does anything, so it reflects
+    /// true ownership regardless of whether the seed or the window fallback
+    /// ends up being what actually registers it.
+    pub profile_created_by_us: bool,
+    pub ext_vsix_sha256: String,
+}
+
+/// The full step. `seed_profile_created_by_us` is the sticky carry-forward
+/// from `state.rs` (already true on a repair run where we made the profile
+/// last time); `prior_ext_vsix_sha256` is the sha this run started with
+/// (`state::Seed::prior_ext_vsix_sha256`).
+#[allow(clippy::too_many_arguments)]
+pub fn ensure_extensions(
+    command_runner: &dyn profile::CommandRunner,
+    ext_runner: &dyn ExtensionsRunner,
+    code_cli: &Path,
+    storage_path: &Path,
+    profiles_dir: &Path,
+    profile_name: &str,
+    seed_location: &str,
+    ext_id: &str,
+    py_ext_id: &str,
+    pylance_id: &str,
+    vsix_path: Option<&Path>,
+    prior_ext_vsix_sha256: &str,
+    seed_profile_created_by_us: bool,
+) -> Result<ExtensionsStepOutcome, ExtensionsError> {
+    let vsix_sha256 = match vsix_path.filter(|p| p.exists()) {
+        Some(p) => sha256_of_file(p)?,
+        None => String::new(),
+    };
+
+    // Recorded BEFORE any registration attempt below: whether WE create the
+    // profile (vs adopt one that already exists), snapshotted from the
+    // on-disk state as it stands right now.
+    let profile_created_by_us =
+        seed_profile_created_by_us || !profile::profile_registered(storage_path, profile_name);
+
+    if all_ext_current(
+        ext_runner,
+        code_cli,
+        profile_name,
+        ext_id,
+        py_ext_id,
+        pylance_id,
+        &vsix_sha256,
+        prior_ext_vsix_sha256,
+    ) {
+        return Ok(ExtensionsStepOutcome {
+            profile_created_by_us,
+            ext_vsix_sha256: vsix_sha256,
+        });
+    }
+
+    // Seed-first: no VS Code window may exist before the final launch (see
+    // profile.rs::register_profile_offline for why -- the panel-auto-open
+    // fix). Errors here are non-fatal at this layer (a seed failure just
+    // means the window fallback below has to do the work); genuine I/O
+    // failures (can't create the profile dir) still propagate.
+    profile::register_profile_offline(
+        command_runner,
+        storage_path,
+        profiles_dir,
+        profile_name,
+        seed_location,
+    )?;
+
+    let ext_result = install_ext(
+        ext_runner,
+        code_cli,
+        profile_name,
+        ext_id,
+        ext_id,
+        vsix_path,
+    );
+    if let Err(ExtensionsError::MissingBundledVsix(id)) = &ext_result {
+        return Err(ExtensionsError::MissingBundledVsix(id.clone()));
+    }
+    let py_result = if ext_result.is_ok() {
+        install_ext(
+            ext_runner,
+            code_cli,
+            profile_name,
+            py_ext_id,
+            ext_id,
+            vsix_path,
+        )
+    } else {
+        Err(ExtensionsError::InstallFailed(py_ext_id.to_string()))
+    };
+
+    if ext_result.is_err() || py_result.is_err() {
+        // Window-registration fallback: a never-launched (or seed-ignoring)
+        // VS Code may still lack the profile, and a headless
+        // --install-extension into a missing profile fails.
+        profile::register_profile(command_runner, code_cli, storage_path, profile_name);
+        install_ext(
+            ext_runner,
+            code_cli,
+            profile_name,
+            ext_id,
+            ext_id,
+            vsix_path,
+        )?;
+        install_ext(
+            ext_runner,
+            code_cli,
+            profile_name,
+            py_ext_id,
+            ext_id,
+            vsix_path,
+        )?;
+    }
+
+    // Pylance ships as a dependency of ms-python.python; if it did not
+    // resolve, install it explicitly so a repair run has a path forward
+    // instead of failing the same way forever.
+    if !has_ext(ext_runner, code_cli, profile_name, pylance_id) {
+        install_ext(
+            ext_runner,
+            code_cli,
+            profile_name,
+            pylance_id,
+            ext_id,
+            vsix_path,
+        )?;
+    }
+
+    let all_present = has_ext(ext_runner, code_cli, profile_name, ext_id)
+        && has_ext(ext_runner, code_cli, profile_name, py_ext_id)
+        && has_ext(ext_runner, code_cli, profile_name, pylance_id);
+    if !all_present {
+        return Err(ExtensionsError::MissingAfterInstall);
+    }
+
+    Ok(ExtensionsStepOutcome {
+        profile_created_by_us,
+        ext_vsix_sha256: vsix_sha256,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    const EXT_ID: &str = "blockless.mpy-hardware-extension";
+    const PY_EXT_ID: &str = "ms-python.python";
+    const PYLANCE_ID: &str = "ms-python.vscode-pylance";
+
+    fn temp_dir(name: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "blockless-installer-extensions-test-{name}-{}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_vsix(dir: &Path, contents: &[u8]) -> PathBuf {
+        let path = dir.join("mpy-hardware-extension.vsix");
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    struct NoopCommandRunner;
+    impl profile::CommandRunner for NoopCommandRunner {
+        fn running_vscode_pids(&self) -> Vec<u32> {
+            vec![]
+        }
+        fn spawn(&self, _code_cli: &Path, _args: &[&str]) -> std::io::Result<u32> {
+            Ok(1)
+        }
+        fn is_alive(&self, _pid: u32) -> bool {
+            false
+        }
+        fn request_graceful_close(&self, _pid: u32) {}
+        fn force_kill(&self, _pid: u32) {}
+        fn sleep(&self, _d: std::time::Duration) {}
+    }
+
+    struct FakeExtensionsRunner {
+        vsix_path_str: String,
+        ext_id: String,
+        installed: RefCell<HashSet<String>>,
+        install_calls: RefCell<Vec<String>>,
+        fail_install_for: RefCell<HashSet<String>>,
+        /// Reports success WITHOUT actually landing the extension --
+        /// exercises the defensive final all-three-present check, which is
+        /// otherwise unreachable through this fake (install success and
+        /// "now installed" are normally the same event).
+        lie_about_success_for: RefCell<HashSet<String>>,
+        list_extensions_fails: RefCell<bool>,
+    }
+
+    impl FakeExtensionsRunner {
+        fn new(vsix_path: &Path) -> FakeExtensionsRunner {
+            FakeExtensionsRunner {
+                vsix_path_str: vsix_path.to_string_lossy().into_owned(),
+                ext_id: EXT_ID.to_string(),
+                installed: RefCell::new(HashSet::new()),
+                install_calls: RefCell::new(Vec::new()),
+                fail_install_for: RefCell::new(HashSet::new()),
+                lie_about_success_for: RefCell::new(HashSet::new()),
+                list_extensions_fails: RefCell::new(false),
+            }
+        }
+
+        fn seed_installed(&self, id: &str) {
+            self.installed.borrow_mut().insert(id.to_lowercase());
+        }
+    }
+
+    impl ExtensionsRunner for FakeExtensionsRunner {
+        fn list_extensions(&self, _code_cli: &Path, _profile_name: &str) -> Option<Vec<String>> {
+            if *self.list_extensions_fails.borrow() {
+                return None;
+            }
+            Some(self.installed.borrow().iter().cloned().collect())
+        }
+        fn install_extension(
+            &self,
+            _code_cli: &Path,
+            _profile_name: &str,
+            vsix_or_id: &str,
+        ) -> bool {
+            self.install_calls.borrow_mut().push(vsix_or_id.to_string());
+            if self.fail_install_for.borrow().contains(vsix_or_id) {
+                return false;
+            }
+            if self.lie_about_success_for.borrow().contains(vsix_or_id) {
+                return true;
+            }
+            let id = if vsix_or_id == self.vsix_path_str {
+                self.ext_id.clone()
+            } else {
+                vsix_or_id.to_string()
+            };
+            self.installed.borrow_mut().insert(id.to_lowercase());
+            true
+        }
+    }
+
+    fn code_cli() -> PathBuf {
+        PathBuf::from("/fake/code")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run(
+        dir: &Path,
+        ext_runner: &FakeExtensionsRunner,
+        vsix_path: Option<&Path>,
+        prior_sha: &str,
+        seed_profile_created_by_us: bool,
+    ) -> Result<ExtensionsStepOutcome, ExtensionsError> {
+        let storage = dir.join("storage.json");
+        let profiles_dir = dir.join("profiles");
+        ensure_extensions(
+            &NoopCommandRunner,
+            ext_runner,
+            &code_cli(),
+            &storage,
+            &profiles_dir,
+            "Blockless",
+            "blockless",
+            EXT_ID,
+            PY_EXT_ID,
+            PYLANCE_ID,
+            vsix_path,
+            prior_sha,
+            seed_profile_created_by_us,
+        )
+    }
+
+    #[test]
+    fn currency_requires_sha_match_not_just_presence() {
+        let dir = temp_dir("sha-currency");
+        let vsix = write_vsix(&dir, b"vsix v2 contents");
+        let runner = FakeExtensionsRunner::new(&vsix);
+        // present, but journaled from a DIFFERENT (older) build
+        runner.seed_installed(EXT_ID);
+        runner.seed_installed(PY_EXT_ID);
+        runner.seed_installed(PYLANCE_ID);
+
+        let sha_of_v2 = sha256_of_file(&vsix).unwrap();
+        let outcome = run(&dir, &runner, Some(&vsix), "sha-of-an-older-build", false).unwrap();
+
+        // must NOT have skipped: install_extension was called for the ext id
+        assert!(
+            runner
+                .install_calls
+                .borrow()
+                .iter()
+                .any(|c| c == &vsix.to_string_lossy()),
+            "a stale sha must trigger a real reinstall, not a skip"
+        );
+        assert_eq!(outcome.ext_vsix_sha256, sha_of_v2);
+    }
+
+    #[test]
+    fn matching_sha_and_all_three_present_skips_entirely() {
+        let dir = temp_dir("skip");
+        let vsix = write_vsix(&dir, b"vsix contents");
+        let runner = FakeExtensionsRunner::new(&vsix);
+        runner.seed_installed(EXT_ID);
+        runner.seed_installed(PY_EXT_ID);
+        runner.seed_installed(PYLANCE_ID);
+        let sha = sha256_of_file(&vsix).unwrap();
+
+        let outcome = run(&dir, &runner, Some(&vsix), &sha, false).unwrap();
+
+        assert!(
+            runner.install_calls.borrow().is_empty(),
+            "a fully current profile must skip without any install call"
+        );
+        assert_eq!(outcome.ext_vsix_sha256, sha);
+    }
+
+    #[test]
+    fn three_id_requirement_pylance_missing_is_not_current() {
+        let dir = temp_dir("three-id");
+        let vsix = write_vsix(&dir, b"vsix contents");
+        let runner = FakeExtensionsRunner::new(&vsix);
+        runner.seed_installed(EXT_ID);
+        runner.seed_installed(PY_EXT_ID);
+        // pylance NOT seeded
+        let sha = sha256_of_file(&vsix).unwrap();
+
+        let outcome = run(&dir, &runner, Some(&vsix), &sha, false).unwrap();
+
+        assert!(
+            runner
+                .install_calls
+                .borrow()
+                .iter()
+                .any(|c| c == PYLANCE_ID),
+            "pylance missing alone must break currency and trigger its install"
+        );
+        assert_eq!(outcome.ext_vsix_sha256, sha);
+    }
+
+    #[test]
+    fn pylance_repair_path_installs_only_pylance_explicitly() {
+        let dir = temp_dir("pylance-repair");
+        let vsix = write_vsix(&dir, b"vsix contents");
+        let runner = FakeExtensionsRunner::new(&vsix);
+        runner.seed_installed(EXT_ID);
+        runner.seed_installed(PY_EXT_ID);
+        let sha = sha256_of_file(&vsix).unwrap();
+
+        run(&dir, &runner, Some(&vsix), &sha, false).unwrap();
+
+        // pylance ends up present, via an explicit install call naming it
+        assert!(runner
+            .installed
+            .borrow()
+            .contains(&PYLANCE_ID.to_lowercase()));
+        assert!(runner
+            .install_calls
+            .borrow()
+            .iter()
+            .any(|c| c == PYLANCE_ID));
+    }
+
+    #[test]
+    fn ours_never_from_marketplace_always_uses_the_vsix_path() {
+        let dir = temp_dir("never-marketplace");
+        let vsix = write_vsix(&dir, b"vsix contents");
+        let runner = FakeExtensionsRunner::new(&vsix);
+        // nothing installed yet: forces the full install path
+
+        run(&dir, &runner, Some(&vsix), "", false).unwrap();
+
+        let calls = runner.install_calls.borrow();
+        assert!(
+            calls.iter().any(|c| c == &vsix.to_string_lossy()),
+            "our extension must be installed from the vsix PATH"
+        );
+        assert!(
+            !calls.iter().any(|c| c == EXT_ID),
+            "our extension id must never be passed to install_extension directly (that would be a Marketplace install)"
+        );
+    }
+
+    #[test]
+    fn missing_vsix_refuses_loudly() {
+        let dir = temp_dir("missing-vsix");
+        let missing = dir.join("does-not-exist.vsix");
+        let runner = FakeExtensionsRunner::new(&missing);
+
+        let err = run(&dir, &runner, Some(&missing), "", false).unwrap_err();
+
+        assert!(matches!(err, ExtensionsError::MissingBundledVsix(id) if id == EXT_ID));
+        assert!(
+            runner.install_calls.borrow().is_empty(),
+            "must never call install_extension when the bundled vsix is missing"
+        );
+    }
+
+    #[test]
+    fn missing_vsix_refuses_even_with_no_vsix_path_at_all() {
+        let dir = temp_dir("no-vsix-arg");
+        let runner = FakeExtensionsRunner::new(Path::new("/unused"));
+
+        let err = run(&dir, &runner, None, "", false).unwrap_err();
+
+        assert!(matches!(err, ExtensionsError::MissingBundledVsix(id) if id == EXT_ID));
+    }
+
+    #[test]
+    fn profile_created_by_us_recorded_pre_seed_when_not_yet_registered() {
+        let dir = temp_dir("created-by-us-fresh");
+        let vsix = write_vsix(&dir, b"vsix contents");
+        let runner = FakeExtensionsRunner::new(&vsix);
+        // storage.json does not exist -> profile is not registered yet
+
+        let outcome = run(&dir, &runner, Some(&vsix), "", false).unwrap();
+
+        assert!(
+            outcome.profile_created_by_us,
+            "we are the ones about to create this profile"
+        );
+    }
+
+    #[test]
+    fn profile_created_by_us_false_when_adopting_an_existing_profile() {
+        let dir = temp_dir("created-by-us-adopt");
+        let vsix = write_vsix(&dir, b"vsix contents");
+        let runner = FakeExtensionsRunner::new(&vsix);
+        let storage = dir.join("storage.json");
+        std::fs::write(
+            &storage,
+            serde_json::json!({"userDataProfiles": [{"location": "blockless", "name": "Blockless"}]})
+                .to_string(),
+        )
+        .unwrap();
+        // extensions still need installing, but the PROFILE itself already
+        // existed before we touched anything -- never claim it as ours.
+        let sha = sha256_of_file(&vsix).unwrap();
+
+        let outcome = run(&dir, &runner, Some(&vsix), &sha, false).unwrap();
+
+        assert!(
+            !outcome.profile_created_by_us,
+            "must not claim ownership of a profile that already existed"
+        );
+    }
+
+    #[test]
+    fn seed_true_stays_sticky_even_if_profile_already_registered() {
+        let dir = temp_dir("created-by-us-sticky");
+        let vsix = write_vsix(&dir, b"vsix contents");
+        let runner = FakeExtensionsRunner::new(&vsix);
+        let storage = dir.join("storage.json");
+        std::fs::write(
+            &storage,
+            serde_json::json!({"userDataProfiles": [{"location": "blockless", "name": "Blockless"}]})
+                .to_string(),
+        )
+        .unwrap();
+        let sha = sha256_of_file(&vsix).unwrap();
+
+        // seeded true from a PRIOR run (we created it before); a repair run
+        // must not lose that fact just because the profile is now present.
+        let outcome = run(&dir, &runner, Some(&vsix), &sha, true).unwrap();
+
+        assert!(outcome.profile_created_by_us);
+    }
+
+    #[test]
+    fn window_fallback_retries_after_a_failed_first_attempt() {
+        let dir = temp_dir("window-fallback");
+        let vsix = write_vsix(&dir, b"vsix contents");
+        let runner = FakeExtensionsRunner::new(&vsix);
+        // the FIRST install_extension call (for our vsix) fails, forcing the
+        // window-registration fallback + retry.
+        runner
+            .fail_install_for
+            .borrow_mut()
+            .insert(vsix.to_string_lossy().into_owned());
+
+        // remove the failure after the first attempt is recorded, so the
+        // retry succeeds -- simulated by clearing it once we see one call.
+        // Simpler: just let it succeed on retry by not failing at all past
+        // the first observed call count.
+        let outcome = run(&dir, &runner, Some(&vsix), "", false);
+
+        // With the failure permanently configured, the retry ALSO fails, so
+        // this should surface as an InstallFailed -- proving the fallback
+        // path really did retry (not silently swallow the first failure).
+        assert!(matches!(outcome, Err(ExtensionsError::InstallFailed(id)) if id == EXT_ID));
+        let calls = runner.install_calls.borrow();
+        assert!(
+            calls
+                .iter()
+                .filter(|c| **c == vsix.to_string_lossy())
+                .count()
+                >= 2,
+            "expected at least 2 attempts (initial + fallback retry), got {calls:?}"
+        );
+    }
+
+    #[test]
+    fn case_insensitive_extension_compare() {
+        let dir = temp_dir("case-insensitive");
+        let vsix = write_vsix(&dir, b"vsix contents");
+        let runner = FakeExtensionsRunner::new(&vsix);
+        runner.seed_installed("Blockless.MPY-Hardware-Extension");
+        runner.seed_installed("MS-Python.Python");
+        runner.seed_installed("MS-Python.Vscode-Pylance");
+        let sha = sha256_of_file(&vsix).unwrap();
+
+        let outcome = run(&dir, &runner, Some(&vsix), &sha, false).unwrap();
+
+        assert!(
+            runner.install_calls.borrow().is_empty(),
+            "differently-cased ids must still count as present"
+        );
+        assert_eq!(outcome.ext_vsix_sha256, sha);
+    }
+
+    #[test]
+    fn install_failure_surfaces_the_failing_id() {
+        let dir = temp_dir("install-failure");
+        let vsix = write_vsix(&dir, b"vsix contents");
+        let runner = FakeExtensionsRunner::new(&vsix);
+        runner
+            .fail_install_for
+            .borrow_mut()
+            .insert(PYLANCE_ID.to_string());
+
+        let err = run(&dir, &runner, Some(&vsix), "", false).unwrap_err();
+
+        assert!(matches!(err, ExtensionsError::InstallFailed(id) if id == PYLANCE_ID));
+    }
+
+    #[test]
+    fn missing_after_install_fails_loudly_even_when_the_cli_reported_success() {
+        let dir = temp_dir("missing-after-install");
+        let vsix = write_vsix(&dir, b"vsix contents");
+        let runner = FakeExtensionsRunner::new(&vsix);
+        // pylance's install call reports success, but never actually lands
+        // (a defensive belt-and-braces scenario: don't just trust the exit
+        // code, re-check presence before declaring the step done).
+        runner
+            .lie_about_success_for
+            .borrow_mut()
+            .insert(PYLANCE_ID.to_string());
+
+        let err = run(&dir, &runner, Some(&vsix), "", false).unwrap_err();
+
+        assert!(matches!(err, ExtensionsError::MissingAfterInstall));
+    }
+}
