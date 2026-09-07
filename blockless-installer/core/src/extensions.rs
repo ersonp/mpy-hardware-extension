@@ -152,7 +152,10 @@ pub struct ExtensionsStepOutcome {
 /// The full step. `seed_profile_created_by_us` is the sticky carry-forward
 /// from `state.rs` (already true on a repair run where we made the profile
 /// last time); `prior_ext_vsix_sha256` is the sha this run started with
-/// (`state::Seed::prior_ext_vsix_sha256`).
+/// (`state::Seed::prior_ext_vsix_sha256`). `force`: bypass the currency
+/// skip and reinstall our extension unconditionally -- `ops::update_extension`
+/// sets this so a forced update actually forces, rather than silently
+/// no-op'ing when the sha already happens to match.
 #[allow(clippy::too_many_arguments)]
 pub fn ensure_extensions(
     command_runner: &dyn profile::CommandRunner,
@@ -168,6 +171,7 @@ pub fn ensure_extensions(
     vsix_path: Option<&Path>,
     prior_ext_vsix_sha256: &str,
     seed_profile_created_by_us: bool,
+    force: bool,
 ) -> Result<ExtensionsStepOutcome, ExtensionsError> {
     let vsix_sha256 = match vsix_path.filter(|p| p.exists()) {
         Some(p) => sha256_of_file(p)?,
@@ -180,16 +184,18 @@ pub fn ensure_extensions(
     let profile_created_by_us =
         seed_profile_created_by_us || !profile::profile_registered(storage_path, profile_name);
 
-    if all_ext_current(
-        ext_runner,
-        code_cli,
-        profile_name,
-        ext_id,
-        py_ext_id,
-        pylance_id,
-        &vsix_sha256,
-        prior_ext_vsix_sha256,
-    ) {
+    if !force
+        && all_ext_current(
+            ext_runner,
+            code_cli,
+            profile_name,
+            ext_id,
+            py_ext_id,
+            pylance_id,
+            &vsix_sha256,
+            prior_ext_vsix_sha256,
+        )
+    {
         return Ok(ExtensionsStepOutcome {
             profile_created_by_us,
             ext_vsix_sha256: vsix_sha256,
@@ -401,6 +407,25 @@ mod tests {
         prior_sha: &str,
         seed_profile_created_by_us: bool,
     ) -> Result<ExtensionsStepOutcome, ExtensionsError> {
+        run_with_force(
+            dir,
+            ext_runner,
+            vsix_path,
+            prior_sha,
+            seed_profile_created_by_us,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_with_force(
+        dir: &Path,
+        ext_runner: &FakeExtensionsRunner,
+        vsix_path: Option<&Path>,
+        prior_sha: &str,
+        seed_profile_created_by_us: bool,
+        force: bool,
+    ) -> Result<ExtensionsStepOutcome, ExtensionsError> {
         let storage = dir.join("storage.json");
         let profiles_dir = dir.join("profiles");
         ensure_extensions(
@@ -417,6 +442,7 @@ mod tests {
             vsix_path,
             prior_sha,
             seed_profile_created_by_us,
+            force,
         )
     }
 
@@ -460,6 +486,29 @@ mod tests {
         assert!(
             runner.install_calls.borrow().is_empty(),
             "a fully current profile must skip without any install call"
+        );
+        assert_eq!(outcome.ext_vsix_sha256, sha);
+    }
+
+    #[test]
+    fn force_bypasses_the_currency_skip_even_when_fully_current() {
+        let dir = temp_dir("force-bypass");
+        let vsix = write_vsix(&dir, b"vsix contents");
+        let runner = FakeExtensionsRunner::new(&vsix);
+        runner.seed_installed(EXT_ID);
+        runner.seed_installed(PY_EXT_ID);
+        runner.seed_installed(PYLANCE_ID);
+        let sha = sha256_of_file(&vsix).unwrap();
+
+        let outcome = run_with_force(&dir, &runner, Some(&vsix), &sha, false, true).unwrap();
+
+        assert!(
+            runner
+                .install_calls
+                .borrow()
+                .iter()
+                .any(|c| c == &vsix.to_string_lossy()),
+            "force=true must reinstall our extension even though the sha already matched"
         );
         assert_eq!(outcome.ext_vsix_sha256, sha);
     }

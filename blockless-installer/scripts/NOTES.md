@@ -23,16 +23,26 @@ has no light mode, so the shipped theme must not flip users to light.
 
 ### Finding
 
-_TODO: fill in after the first fresh-VM run._
+- Winner: **A**. Settled in the M1 scope (`/scope.md`'s "Settings" decision):
+  mechanism A only, shipped as the sole path in `settings.rs`; mechanism B
+  (the user's default `settings.json`) was removed from the scripts and was
+  never carried into `installer-core`.
+- Seeded `userDataProfiles` entry (answerable from the scripts/core directly,
+  not rig-dependent — this is exactly what `register_profile_offline`/
+  `profile.rs::register_profile_offline` writes, deterministically):
 
-- Winner: (A | B)
-- macOS observed `userDataProfiles` excerpt from storage.json:
-
+```json
+{ "location": "blockless", "name": "Blockless" }
 ```
-(paste the observed array entry for the Blockless profile here)
-```
 
-- Notes / surprises:
+- Notes / surprises: the seeded `location` ("blockless") is only the id for
+  a fresh, offline-seeded profile. If the offline seed is skipped (a VS Code
+  instance was already running) and the window-fallback registration path
+  creates the profile instead, VS Code assigns a hashed directory id of its
+  own — `profile.rs::resolve_profile_location` reads that back and
+  `state.json`'s `profileLocation` is journaled from THAT value, never the
+  seed constant, so `verify.rs`/`settings.rs` always resolve the real
+  on-disk id regardless of which path registered it.
 
 ## Profile registration (no headless create)
 

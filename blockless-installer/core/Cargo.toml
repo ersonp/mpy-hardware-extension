@@ -12,3 +12,6 @@ sha2 = "0.10"
 # blocking + rustls-tls: no async runtime to thread through the CLI, no system
 # OpenSSL dependency. Honors HTTPS_PROXY/HTTP_PROXY env by default (§11).
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+# diagnostics bundle: a plain container for logs/state/manifest, not
+# performance-sensitive, so deflate only (skip bzip2/zstd/aes backends).
+zip = { version = "2", default-features = false, features = ["deflate"] }
