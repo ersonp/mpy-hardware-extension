@@ -68,6 +68,30 @@ app-wide quit, no reliance on `open -gj`.
 _TODO: fill in as runs surface them (e.g. `/Applications` writability, profile not
 registered until first launch, arch detection, proxy behavior)._
 
+## Acceptance checklist: replace the shape fixture with a real capture
+
+`core/tests/fixtures/vscode-update-api.darwin-universal.SHAPE.json` is a
+hand-authored stand-in (built in a sandbox with no route to
+`update.code.visualstudio.com`), not a recorded response, and its
+`sha256hash` is a deliberate all-zero placeholder rather than a
+plausible-looking digest. This is a required rig step, not optional
+cleanup — a fixture nobody observed only proves the parser agrees with
+itself.
+
+1. On the rig: `curl https://update.code.visualstudio.com/api/update/darwin-universal/stable/latest`
+   (or just run the `#[ignore]`d test below, which does the same GET) and
+   save the raw response body.
+2. Record it as `core/tests/fixtures/vscode-update-api.darwin-universal.json`
+   (no `.SHAPE.` — that marker means "not real").
+3. `git rm core/tests/fixtures/vscode-update-api.darwin-universal.SHAPE.json`.
+4. Update `core/src/manifest.rs`: the `include_str!` path (drop `SHAPE_`
+   from the const name), and `resolver_parses_the_shape_fixture`'s name +
+   assertions (the real `sha256hash` won't be all-zeros anymore).
+5. Run `cargo test --workspace -- --ignored live_response_still_matches_captured_shape`
+   to confirm the live shape still parses against the freshly recorded
+   fixture.
+6. Full detail: `core/tests/fixtures/README.md`.
+
 ## Pinned versions confirmed working
 
 - VS Code: (productVersion observed)

@@ -339,8 +339,14 @@ mod tests {
     use super::*;
 
     const COMMITTED_MANIFEST: &str = include_str!("../../manifest/installer.manifest.json");
-    const FIXTURE_UPDATE_API: &str =
-        include_str!("../tests/fixtures/vscode-update-api.darwin-universal.json");
+    /// HAND-AUTHORED SHAPE STAND-IN, NOT a recorded response -- this sandbox
+    /// has no route to `update.code.visualstudio.com` to capture one from.
+    /// See `tests/fixtures/README.md` for the exact rig steps to replace
+    /// this with a real capture (drop the `.SHAPE.` marker in the filename
+    /// once it's real). Its `sha256hash` is deliberately all-zeros, not a
+    /// plausible-looking digest, so it can never be mistaken for one.
+    const SHAPE_FIXTURE_UPDATE_API: &str =
+        include_str!("../tests/fixtures/vscode-update-api.darwin-universal.SHAPE.json");
 
     #[test]
     fn committed_manifest_parses_and_validates() {
@@ -462,11 +468,15 @@ mod tests {
     }
 
     #[test]
-    fn resolver_parses_the_captured_fixture() {
-        let resp = VscodeUpdateApiResponse::parse(FIXTURE_UPDATE_API).unwrap();
+    fn resolver_parses_the_shape_fixture() {
+        // Proves the shape stand-in parses and the fields the resolver
+        // actually reads come through -- NOT proof the shape matches a real
+        // response (that's what `live_update_api.rs`'s rig-only ignored
+        // test is for).
+        let resp = VscodeUpdateApiResponse::parse(SHAPE_FIXTURE_UPDATE_API).unwrap();
         assert_eq!(resp.product_version, "1.99.0");
         assert!(resp.url.starts_with("https://"));
-        assert_eq!(resp.sha256_hash.len(), 64);
+        assert_eq!(resp.sha256_hash, "0".repeat(64), "the fixture's sha must stay the obviously-fake placeholder, never a plausible-looking one");
     }
 
     #[test]
