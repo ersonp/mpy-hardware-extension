@@ -8,8 +8,7 @@ publish.workspace = true
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-
-[dev-dependencies]
-# Only exercised by the #[ignore]-gated live-shape test (rig-only); promoted to
-# a real dependency of fetch.rs in commit 3 once the general downloader lands.
+sha2 = "0.10"
+# blocking + rustls-tls: no async runtime to thread through the CLI, no system
+# OpenSSL dependency. Honors HTTPS_PROXY/HTTP_PROXY env by default (§11).
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
