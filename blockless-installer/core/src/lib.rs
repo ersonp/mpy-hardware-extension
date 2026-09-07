@@ -6,5 +6,6 @@ pub mod profile;
 pub mod runtime;
 pub mod settings;
 pub mod state;
+pub mod uninstall;
 pub mod verify;
 pub mod vscode;
