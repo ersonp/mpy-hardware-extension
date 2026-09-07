@@ -6,3 +6,10 @@ publish.workspace = true
 
 [dependencies]
 thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# Only exercised by the #[ignore]-gated live-shape test (rig-only); promoted to
+# a real dependency of fetch.rs in commit 3 once the general downloader lands.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }

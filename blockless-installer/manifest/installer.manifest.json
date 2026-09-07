@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "installerVersion": "0.1.0",
+  "profileName": "Blockless",
+  "settings": {
+    "workbench.colorTheme": "Default Dark Modern",
+    "mpyhw.autoOpenPanel": true,
+    "workbench.secondarySideBar.defaultVisibility": "hidden"
+  },
+  "components": {
+    "vscode": {
+      "source": "download",
+      "resolver": "vscode-update-api",
+      "channel": "stable",
+      "platform": {
+        "darwin": "darwin-universal",
+        "win32-x64": "win32-x64-user",
+        "win32-arm64": "win32-arm64-user"
+      }
+    },
+    "uv": {
+      "source": "download",
+      "version": "0.11.29",
+      "sha256": {
+        "darwin-aarch64": "0000000000000000000000000000000000000000000000000000000000000000",
+        "darwin-x86_64": "0000000000000000000000000000000000000000000000000000000000000000",
+        "win32-x64": "0000000000000000000000000000000000000000000000000000000000000000",
+        "win32-arm64": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "python": {
+      "source": "managed",
+      "manager": "uv",
+      "series": "3.12"
+    },
+    "mpremote": {
+      "source": "pip",
+      "version": "1.28.0"
+    },
+    "extension": {
+      "source": "bundled",
+      "id": "blockless.mpy-hardware-extension",
+      "version": "0.4.2",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "path": "components/mpy-hardware-extension.vsix"
+    },
+    "pythonExtension": {
+      "source": "marketplace",
+      "id": "ms-python.python"
+    }
+  }
+}
