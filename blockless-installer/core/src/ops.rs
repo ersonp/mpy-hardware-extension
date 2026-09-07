@@ -464,7 +464,7 @@ pub fn uninstall(
     ctx: &OpsContext,
     flags: &UninstallFlags,
 ) -> UninstallOutcome {
-    let vscode_dirs = vscode_install_locations(env, ctx);
+    let vscode_dirs = vscode_install_locations(ctx);
     uninstall::uninstall(
         env,
         env,
@@ -484,10 +484,12 @@ pub fn uninstall(
 /// Mac: every `mac_install_targets` entry joined with the app bundle name
 /// directly (matches `vscode.rs`'s own writability-fallback candidates
 /// one-to-one, independent of runnability -- up to two real locations).
-/// Windows: derived from whichever candidate is currently runnable, since
-/// there is only ever one Windows install location and no equivalent
-/// fixed-targets list to enumerate instead.
-fn vscode_install_locations(env: &dyn Environment, ctx: &OpsContext) -> Vec<PathBuf> {
+/// Windows: every `code_candidates` entry mapped through `vscode_app_root`
+/// unconditionally, the same way -- there is only ever one Windows install
+/// location, but it must not depend on `--version` succeeding either, or a
+/// corrupt/half-deleted install with `vscodeInstalledByUs: true` is silently
+/// left behind.
+fn vscode_install_locations(ctx: &OpsContext) -> Vec<PathBuf> {
     match ctx.os {
         Os::MacOs => ctx
             .mac_install_targets
@@ -497,9 +499,7 @@ fn vscode_install_locations(env: &dyn Environment, ctx: &OpsContext) -> Vec<Path
         Os::Windows => ctx
             .code_candidates
             .iter()
-            .find(|c| env.version(c).is_some())
-            .and_then(|working_cli| vscode_app_root(ctx.os, working_cli))
-            .into_iter()
+            .filter_map(|c| vscode_app_root(ctx.os, c))
             .collect(),
     }
 }
@@ -1158,6 +1158,83 @@ mod tests {
             } => assert!(!profile_removed),
             other => panic!("expected Finished, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn windows_uninstall_locations_include_a_candidate_that_fails_version() {
+        // Mirrors the reviewer's finding: `vscode_install_locations` must not
+        // filter Windows candidates through `env.version(c).is_some()` --
+        // that only finds a RUNNABLE `code.cmd`, so a corrupt or
+        // half-deleted install (candidate path exists, `--version` no longer
+        // works) would be silently skipped, the same class already fixed for
+        // mac.
+        let dir = temp_dir("windows-locations");
+        let manifest = test_manifest();
+        let vsix = write_vsix(&dir, b"vsix contents");
+        let mut ctx = make_ctx(&dir, &manifest, &vsix);
+        ctx.os = Os::Windows;
+        let code_cli = dir
+            .join("LOCALAPPDATA")
+            .join("Programs")
+            .join("Microsoft VS Code")
+            .join("bin")
+            .join("code.cmd");
+        ctx.code_candidates = vec![code_cli];
+        ctx.mac_install_targets = vec![];
+
+        let locations = vscode_install_locations(&ctx);
+
+        assert_eq!(
+            locations,
+            vec![dir
+                .join("LOCALAPPDATA")
+                .join("Programs")
+                .join("Microsoft VS Code")],
+            "the Windows candidate must be included even though no \
+             Environment was consulted about its runnability"
+        );
+    }
+
+    #[test]
+    fn windows_uninstall_removes_a_broken_install_version_check_fails() {
+        // End-to-end: `ops::uninstall` on Windows, with `vscodeInstalledByUs`
+        // true and the install directory present on disk, but the `code` CLI
+        // no longer runs (`version()` returns `None`) -- the install must
+        // still be found and removed, not silently left behind with
+        // `vscode_removed: false`.
+        let dir = temp_dir("windows-uninstall-broken");
+        let manifest = test_manifest();
+        let vsix = write_vsix(&dir, b"vsix contents");
+        let mut ctx = make_ctx(&dir, &manifest, &vsix);
+        ctx.os = Os::Windows;
+        let vscode_dir = dir
+            .join("LOCALAPPDATA")
+            .join("Programs")
+            .join("Microsoft VS Code");
+        let code_cli = vscode_dir.join("bin").join("code.cmd");
+        ctx.code_candidates = vec![code_cli.clone()];
+        ctx.mac_install_targets = vec![];
+        std::fs::create_dir_all(&vscode_dir).unwrap();
+
+        let state = State {
+            vscode_installed_by_us: true,
+            profile_created_by_us: false,
+            ..Default::default()
+        };
+        state.write(&ctx.paths.state).unwrap();
+
+        let env = FakeEnvironment::new(&code_cli, &vsix);
+        *env.vscode_version.borrow_mut() = None; // the broken CLI: --version fails
+
+        let outcome = uninstall(&env, &ctx, &UninstallFlags::default());
+
+        match outcome {
+            UninstallOutcome::Finished { vscode_removed, .. } => {
+                assert!(vscode_removed, "a broken-CLI install must still be removed")
+            }
+            other => panic!("expected Finished, got {other:?}"),
+        }
+        assert!(!vscode_dir.exists());
     }
 
     #[test]
