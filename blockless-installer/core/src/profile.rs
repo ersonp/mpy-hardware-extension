@@ -5,14 +5,18 @@
 //! `resolve_profile_location`/`Get-ProfileLocation`, and
 //! `register_profile`/`Register-Profile` + `stop_code_and_wait`/`Stop-OurCode`.
 //!
-//! The window-launch fallback diverges from M0 on purpose, per `NOTES.md`:
-//! M0 (both platforms) finds "the" VS Code process by name/pattern after the
-//! fact (`pgrep -f`, `Get-Process -Name Code`) because a shell script has no
-//! handle to what it launched. This core spawns VS Code itself and holds the
-//! real child PID from the start, so teardown targets that exact PID -- never
-//! a pattern match that could also catch a window the user opened. All
-//! process operations go through [`CommandRunner`] so this is testable
-//! without a real VS Code binary or real wall-clock waits.
+//! The window-launch fallback resolves the real VS Code process the same way
+//! M0's Windows script does (`Get-CodePids` before/after): `code_cli` is a
+//! wrapper -- on mac a short shell script, on Windows a `.cmd` -- that hands
+//! off to the real Electron process and may itself have already exited by
+//! the time that process is up, so the PID `spawn()` returns is never used
+//! for teardown. Instead: snapshot `running_vscode_pids()` before spawning,
+//! spawn, poll for registration, then diff `running_vscode_pids()` again to
+//! find whichever PID(s) newly appeared. Only those get torn down, and only
+//! if nothing was already running before we spawned -- so a window the user
+//! opened themselves is never touched. All process operations go through
+//! [`CommandRunner`] so this is testable without a real VS Code binary or
+//! real wall-clock waits.
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -133,19 +137,21 @@ pub fn register_profile_offline(
         Err(_) => return Ok(RegisterOfflineOutcome::SkippedUnparseableStorage),
     };
 
+    // A storage.json that parses but isn't a JSON object (VS Code never
+    // writes one that isn't, but a hand-edited or foreign file could be) has
+    // nowhere to hold userDataProfiles -- treat it the same as unparseable
+    // rather than panic or silently drop the registration. Checked before
+    // creating the profile directory below, so a storage.json we can't use
+    // never leaves an orphaned profile dir behind.
+    let Some(obj) = root.as_object_mut() else {
+        return Ok(RegisterOfflineOutcome::SkippedUnparseableStorage);
+    };
+
     let profile_dir = profiles_dir.join(seed_location);
     std::fs::create_dir_all(&profile_dir).map_err(|source| ProfileError::CreateDir {
         path: profile_dir,
         source,
     })?;
-
-    // A storage.json that parses but isn't a JSON object (VS Code never
-    // writes one that isn't, but a hand-edited or foreign file could be) has
-    // nowhere to hold userDataProfiles -- treat it the same as unparseable
-    // rather than panic or silently drop the registration.
-    let Some(obj) = root.as_object_mut() else {
-        return Ok(RegisterOfflineOutcome::SkippedUnparseableStorage);
-    };
     if !obj.get("userDataProfiles").is_some_and(Value::is_array) {
         obj.insert("userDataProfiles".to_string(), Value::Array(Vec::new()));
     }
@@ -197,8 +203,18 @@ pub enum RegisterProfileOutcome {
 
 /// Fallback only: a live VS Code owns `storage.json`, or the offline seed
 /// otherwise didn't take. Launch `code_cli --profile <name> --new-window`,
-/// poll for registration, then close the process WE spawned -- but only if
-/// nothing was already running before we launched.
+/// poll for registration, then close whichever process(es) newly appeared --
+/// but only if nothing was already running before we launched.
+///
+/// `spawn()`'s own return value is deliberately unused for teardown: on mac,
+/// `code_cli` is a shell wrapper that hands off to `Visual Studio
+/// Code.app/.../Electron` and typically exits well before that real process
+/// is even up, so its PID names a process that is already gone by the time
+/// we'd poll `is_alive` on it -- indistinguishable from "closed successfully"
+/// and, before this fix, exactly why the real window this fallback opens was
+/// never actually closed. The real PID(s) are resolved the same way M0's own
+/// Windows script does it (`Get-CodePids` before/after): diff
+/// `running_vscode_pids()` from before spawning against after the poll.
 ///
 /// Attach-to-existing-instance caveat (documented, not fixable by PID
 /// bookkeeping): if the user opens VS Code during the poll below while ours
@@ -218,10 +234,12 @@ pub fn register_profile(
         return RegisterProfileOutcome::AlreadyRegistered;
     }
     let before = runner.running_vscode_pids();
-    let spawned_pid = match runner.spawn(code_cli, &["--profile", profile_name, "--new-window"]) {
-        Ok(pid) => pid,
-        Err(_) => return RegisterProfileOutcome::SpawnFailed,
-    };
+    if runner
+        .spawn(code_cli, &["--profile", profile_name, "--new-window"])
+        .is_err()
+    {
+        return RegisterProfileOutcome::SpawnFailed;
+    }
 
     let mut registered = false;
     for _ in 0..60 {
@@ -233,7 +251,10 @@ pub fn register_profile(
     }
 
     if before.is_empty() {
-        stop_and_wait(runner, spawned_pid);
+        let after = runner.running_vscode_pids();
+        for pid in after.into_iter().filter(|p| !before.contains(p)) {
+            stop_and_wait(runner, pid);
+        }
     }
 
     if registered {
@@ -283,7 +304,12 @@ mod tests {
     }
 
     struct FakeRunner {
-        running_before: Vec<u32>,
+        /// The live process list, extended by `spawn()` with
+        /// `pids_on_spawn` -- lets a test simulate "spawn()'s own returned
+        /// PID is a short-lived wrapper; DIFFERENT PID(s) are what actually
+        /// show up in the process list."
+        running_pids: RefCell<Vec<u32>>,
+        pids_on_spawn: Vec<u32>,
         spawn_result: std::io::Result<u32>,
         graceful_close_calls: RefCell<Vec<u32>>,
         force_kill_calls: RefCell<Vec<u32>>,
@@ -298,7 +324,8 @@ mod tests {
     impl FakeRunner {
         fn new(running_before: Vec<u32>, spawn_result: std::io::Result<u32>) -> FakeRunner {
             FakeRunner {
-                running_before,
+                running_pids: RefCell::new(running_before),
+                pids_on_spawn: Vec::new(),
                 spawn_result,
                 graceful_close_calls: RefCell::new(Vec::new()),
                 force_kill_calls: RefCell::new(Vec::new()),
@@ -311,15 +338,28 @@ mod tests {
             *self.alive_sequence.borrow_mut() = seq.into_iter();
             self
         }
+
+        /// The PID(s) that "appear" in `running_vscode_pids()` once
+        /// `spawn()` is called -- simulates the real Electron process(es),
+        /// distinct from whatever PID `spawn()` itself returns.
+        fn with_pids_on_spawn(mut self, pids: Vec<u32>) -> Self {
+            self.pids_on_spawn = pids;
+            self
+        }
     }
 
     impl CommandRunner for FakeRunner {
         fn running_vscode_pids(&self) -> Vec<u32> {
-            self.running_before.clone()
+            self.running_pids.borrow().clone()
         }
         fn spawn(&self, _code_cli: &Path, _args: &[&str]) -> std::io::Result<u32> {
             match &self.spawn_result {
-                Ok(pid) => Ok(*pid),
+                Ok(pid) => {
+                    self.running_pids
+                        .borrow_mut()
+                        .extend(self.pids_on_spawn.iter().copied());
+                    Ok(*pid)
+                }
                 Err(e) => Err(std::io::Error::new(e.kind(), e.to_string())),
             }
         }
@@ -491,12 +531,17 @@ mod tests {
     // --- register_profile: window-launch fallback + exact-PID teardown ---
 
     #[test]
-    fn fallback_polls_until_registered_then_gracefully_closes_the_spawned_pid() {
+    fn fallback_polls_until_registered_then_gracefully_closes_the_real_pid_not_the_spawn_return() {
         let dir = temp_dir("fallback-poll");
         let storage = dir.join("storage.json");
         let code_cli = dir.join("code");
 
-        let runner = FakeRunner::new(vec![], Ok(4242)).with_alive_sequence(vec![false]);
+        // spawn() returns 4242 (the launcher/wrapper's PID), but 9001 is what
+        // actually shows up in the process list once spawned -- teardown
+        // must target 9001, never the value spawn() returned.
+        let runner = FakeRunner::new(vec![], Ok(4242))
+            .with_pids_on_spawn(vec![9001])
+            .with_alive_sequence(vec![false]);
         let storage_for_sleep = storage.clone();
         let calls = std::rc::Rc::new(RefCell::new(0u32));
         let calls_for_closure = calls.clone();
@@ -514,11 +559,46 @@ mod tests {
         let outcome = register_profile(&runner, &code_cli, &storage, "Blockless");
 
         assert_eq!(outcome, RegisterProfileOutcome::Registered);
-        assert_eq!(*runner.graceful_close_calls.borrow(), vec![4242]);
+        assert_eq!(
+            *runner.graceful_close_calls.borrow(),
+            vec![9001],
+            "must tear down the PID that newly appeared in the process list, \
+             not the (possibly already-exited wrapper) PID spawn() returned"
+        );
         assert!(
             runner.force_kill_calls.borrow().is_empty(),
             "graceful close succeeded (is_alive -> false); force_kill must not run"
         );
+    }
+
+    #[test]
+    fn fallback_tears_down_every_pid_that_newly_appeared() {
+        // VS Code's launch can bring up more than one process matching the
+        // running-pids probe (e.g. main + a helper); every one that's new
+        // since before spawning must be torn down, not just the first.
+        let dir = temp_dir("fallback-multi-pid");
+        let storage = dir.join("storage.json");
+        let code_cli = dir.join("code");
+
+        let runner = FakeRunner::new(vec![], Ok(4242))
+            .with_pids_on_spawn(vec![9001, 9002])
+            .with_alive_sequence(vec![false, false]);
+        // profile isn't registered yet under that name -- overwrite with the
+        // real entry on first sleep so the poll succeeds immediately.
+        let storage_for_sleep = storage.clone();
+        *runner.on_sleep.borrow_mut() = Box::new(move || {
+            write_json(
+                &storage_for_sleep,
+                &serde_json::json!({"userDataProfiles": [{"location": "blockless", "name": "Blockless"}]}),
+            );
+        });
+
+        let outcome = register_profile(&runner, &code_cli, &storage, "Blockless");
+
+        assert_eq!(outcome, RegisterProfileOutcome::Registered);
+        let mut closed = runner.graceful_close_calls.borrow().clone();
+        closed.sort();
+        assert_eq!(closed, vec![9001, 9002]);
     }
 
     #[test]

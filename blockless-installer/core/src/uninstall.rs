@@ -21,7 +21,7 @@
 use crate::profile;
 use crate::state::State;
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// OS-native deletion operations, injected so this is unit-testable without
 /// a real filesystem-tree removal or a real VS Code uninstaller.
@@ -149,7 +149,13 @@ pub fn uninstall(
     profiles_dir: &Path,
     profile_name: &str,
     blk: &Path,
-    vscode_dir: &Path,
+    // Every location this install could plausibly have put VS Code (mac: up
+    // to two -- /Applications and ~/Applications, since `vscode.rs`'s own
+    // writability fallback can land at either; Windows: always exactly one).
+    // Each one that exists on disk gets removed, not just whichever the
+    // caller happened to derive from a currently-runnable `code` CLI -- a
+    // broken/stale candidate must not leave a real install undetected.
+    vscode_dirs: &[PathBuf],
     flags: &UninstallFlags,
 ) -> UninstallOutcome {
     // Read state BEFORE any deletion. Any failure to positively confirm
@@ -218,12 +224,25 @@ pub fn uninstall(
     };
 
     let should_remove_vscode = !flags.keep_vscode && (flags.all || vscode_installed_by_us);
-    let vscode_removed = if should_remove_vscode && vscode_dir.exists() {
-        match runner.run_vscode_uninstaller(vscode_dir) {
-            Ok(true) => true,
-            Ok(false) => runner.remove_dir_all(vscode_dir).is_ok() && !vscode_dir.exists(),
-            Err(_) => false,
+    // `true` only once every EXISTING candidate was actually removed -- a
+    // partial removal (e.g. a locked file at one location) must not report
+    // success, matching this function's existing honesty posture for BLK.
+    let vscode_removed = if should_remove_vscode {
+        let mut all_removed = true;
+        let mut any_existed = false;
+        for vscode_dir in vscode_dirs {
+            if !vscode_dir.exists() {
+                continue;
+            }
+            any_existed = true;
+            let removed = match runner.run_vscode_uninstaller(vscode_dir) {
+                Ok(true) => true,
+                Ok(false) => runner.remove_dir_all(vscode_dir).is_ok() && !vscode_dir.exists(),
+                Err(_) => false,
+            };
+            all_removed &= removed;
         }
+        any_existed && all_removed
     } else {
         false
     };
@@ -376,7 +395,7 @@ mod tests {
             &l.profiles_dir,
             "Blockless",
             &l.blk,
-            &l.vscode_dir,
+            std::slice::from_ref(&l.vscode_dir),
             &UninstallFlags::default(),
         );
         match outcome {
@@ -405,7 +424,7 @@ mod tests {
             &l.profiles_dir,
             "Blockless",
             &l.blk,
-            &l.vscode_dir,
+            std::slice::from_ref(&l.vscode_dir),
             &UninstallFlags::default(),
         );
 
@@ -435,7 +454,7 @@ mod tests {
             &l.profiles_dir,
             "Blockless",
             &l.blk,
-            &l.vscode_dir,
+            std::slice::from_ref(&l.vscode_dir),
             &UninstallFlags::default(),
         );
 
@@ -475,7 +494,7 @@ mod tests {
             &l.profiles_dir,
             "Blockless",
             &l.blk,
-            &l.vscode_dir,
+            std::slice::from_ref(&l.vscode_dir),
             &UninstallFlags::default(),
         );
 
@@ -522,7 +541,7 @@ mod tests {
             &l.profiles_dir,
             "Blockless",
             &l.blk,
-            &l.vscode_dir,
+            std::slice::from_ref(&l.vscode_dir),
             &UninstallFlags::default(),
         );
 
@@ -569,7 +588,7 @@ mod tests {
             &l.profiles_dir,
             "Blockless",
             &l.blk,
-            &l.vscode_dir,
+            std::slice::from_ref(&l.vscode_dir),
             &UninstallFlags::default(),
         );
 
@@ -599,7 +618,7 @@ mod tests {
             &l.profiles_dir,
             "Blockless",
             &l.blk,
-            &l.vscode_dir,
+            std::slice::from_ref(&l.vscode_dir),
             &UninstallFlags::default(),
         );
 
@@ -634,7 +653,7 @@ mod tests {
             &l.profiles_dir,
             "Blockless",
             &l.blk,
-            &l.vscode_dir,
+            std::slice::from_ref(&l.vscode_dir),
             &UninstallFlags::default(),
         );
 
@@ -642,6 +661,84 @@ mod tests {
             UninstallOutcome::Finished { vscode_removed, .. } => assert!(vscode_removed),
             other => panic!("expected Finished, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn removes_every_existing_vscode_location_not_just_the_first() {
+        // Mirrors the reviewer's finding: a mac install can plausibly have
+        // landed at either /Applications or ~/Applications (`vscode.rs`'s
+        // own writability fallback), and a stale/broken `code` CLI candidate
+        // must not leave a real install at the OTHER location undetected.
+        let l = layout("multi-location");
+        let mut state = default_state();
+        state.profile_created_by_us = false;
+        state.vscode_installed_by_us = true;
+        write_state(&l.state_path, &state);
+        let root = l.blk.parent().unwrap();
+        let apps = root.join("Applications");
+        let home_apps = root.join("HomeApplications");
+        std::fs::create_dir_all(&apps).unwrap();
+        std::fs::create_dir_all(&home_apps).unwrap();
+        let runner = FakeUninstallRunner::default();
+
+        let outcome = uninstall(
+            &not_running(),
+            &runner,
+            &l.state_path,
+            &l.storage_path,
+            &l.profiles_dir,
+            "Blockless",
+            &l.blk,
+            &[apps.clone(), home_apps.clone()],
+            &UninstallFlags::default(),
+        );
+
+        match outcome {
+            UninstallOutcome::Finished { vscode_removed, .. } => assert!(vscode_removed),
+            other => panic!("expected Finished, got {other:?}"),
+        }
+        assert!(!apps.exists(), "the first location must be removed");
+        assert!(
+            !home_apps.exists(),
+            "the second location must ALSO be removed"
+        );
+    }
+
+    #[test]
+    fn a_locked_second_location_reports_vscode_removed_false_not_true() {
+        // Honesty check: removing the first location but failing on the
+        // second must not report overall success.
+        let l = layout("multi-location-partial");
+        let mut state = default_state();
+        state.profile_created_by_us = false;
+        state.vscode_installed_by_us = true;
+        write_state(&l.state_path, &state);
+        let root = l.blk.parent().unwrap();
+        let apps = root.join("Applications");
+        let home_apps = root.join("HomeApplications");
+        std::fs::create_dir_all(&apps).unwrap();
+        std::fs::create_dir_all(&home_apps).unwrap();
+        let runner = FakeUninstallRunner::default();
+        runner.fail_remove_for.borrow_mut().push(home_apps.clone());
+
+        let outcome = uninstall(
+            &not_running(),
+            &runner,
+            &l.state_path,
+            &l.storage_path,
+            &l.profiles_dir,
+            "Blockless",
+            &l.blk,
+            &[apps.clone(), home_apps.clone()],
+            &UninstallFlags::default(),
+        );
+
+        match outcome {
+            UninstallOutcome::Finished { vscode_removed, .. } => assert!(!vscode_removed),
+            other => panic!("expected Finished, got {other:?}"),
+        }
+        assert!(!apps.exists(), "the removable location is still removed");
+        assert!(home_apps.exists(), "the locked location must survive");
     }
 
     #[test]
@@ -662,7 +759,7 @@ mod tests {
             &l.profiles_dir,
             "Blockless",
             &l.blk,
-            &l.vscode_dir,
+            std::slice::from_ref(&l.vscode_dir),
             &UninstallFlags::default(),
         );
 
@@ -693,7 +790,7 @@ mod tests {
             &l.profiles_dir,
             "Blockless",
             &l.blk,
-            &l.vscode_dir,
+            std::slice::from_ref(&l.vscode_dir),
             &UninstallFlags {
                 all: true,
                 keep_vscode: true,
@@ -725,7 +822,7 @@ mod tests {
             &l.profiles_dir,
             "Blockless",
             &l.blk,
-            &l.vscode_dir,
+            std::slice::from_ref(&l.vscode_dir),
             &UninstallFlags {
                 all: true,
                 keep_vscode: false,
@@ -757,7 +854,7 @@ mod tests {
             &l.profiles_dir,
             "Blockless",
             &l.blk,
-            &l.vscode_dir,
+            std::slice::from_ref(&l.vscode_dir),
             &UninstallFlags::default(),
         );
 

@@ -145,13 +145,14 @@ pub struct Seed {
     /// (e.g. `"blockless"`) when nothing was journaled yet.
     pub profile_location: String,
     /// The sha this run started with, kept for `extensions.rs`'s
-    /// current-build comparison (`our_ext_is_bundled_build`).
+    /// current-build comparison (`our_ext_is_bundled_build`). The
+    /// incremental-write-before-step-2-completes concern this field's
+    /// sibling once existed for is already covered without it: every op
+    /// starts `current` as a full clone of `prior` (`prior.unwrap_or_default()`),
+    /// so `current.ext_vsix_sha256` already carries the previous value
+    /// forward through every write until step 2 explicitly overwrites it --
+    /// a separate seeded copy here was dead weight nothing ever read.
     pub prior_ext_vsix_sha256: String,
-    /// Seeded to the same value as `prior_ext_vsix_sha256` so an incremental
-    /// write before step 2 completes can never transiently blank a
-    /// previously recorded sha (a mid-run crash then leaves the next run's
-    /// carry-forward intact).
-    pub ext_vsix_sha256: String,
 }
 
 pub fn seed_from_prior(prior: Option<&State>, default_profile_location: &str) -> Seed {
@@ -161,7 +162,6 @@ pub fn seed_from_prior(prior: Option<&State>, default_profile_location: &str) ->
             profile_created_by_us: false,
             profile_location: default_profile_location.to_string(),
             prior_ext_vsix_sha256: String::new(),
-            ext_vsix_sha256: String::new(),
         },
         Some(state) => Seed {
             vscode_installed_by_us: state.vscode_installed_by_us,
@@ -172,7 +172,6 @@ pub fn seed_from_prior(prior: Option<&State>, default_profile_location: &str) ->
                 state.profile_location.clone()
             },
             prior_ext_vsix_sha256: state.ext_vsix_sha256.clone(),
-            ext_vsix_sha256: state.ext_vsix_sha256.clone(),
         },
     }
 }
@@ -319,7 +318,6 @@ mod tests {
                 profile_created_by_us: false,
                 profile_location: "blockless".to_string(),
                 prior_ext_vsix_sha256: String::new(),
-                ext_vsix_sha256: String::new(),
             }
         );
     }
@@ -380,17 +378,13 @@ mod tests {
     }
 
     #[test]
-    fn ext_vsix_sha256_carries_forward_into_both_fields() {
+    fn ext_vsix_sha256_carries_forward_into_prior_ext_vsix_sha256() {
         let prior = State {
             ext_vsix_sha256: "deadbeef".to_string(),
             ..Default::default()
         };
         let seed = seed_from_prior(Some(&prior), "blockless");
         assert_eq!(seed.prior_ext_vsix_sha256, "deadbeef");
-        assert_eq!(
-            seed.ext_vsix_sha256, "deadbeef",
-            "seeded so an incremental write before step 2 finishes can't blank a good prior value"
-        );
     }
 
     #[test]

@@ -81,6 +81,17 @@ mod mac {
             run_ok(Command::new("kill").args(["-0", &pid.to_string()]))
         }
         fn request_graceful_close(&self, pid: u32) {
+            // SIGTERM on the exact resolved Electron PID, not `osascript ...
+            // quit` (an app-wide signal): NOTES.md's registration section
+            // explicitly calls for owning teardown by PID rather than
+            // reaching for an app-wide quit. Open question, unverifiable
+            // from source and owed to the acceptance rig: does VS Code's
+            // Electron main process treat SIGTERM as equivalent to a normal
+            // quit for window/profile-state saving, the way `osascript
+            // quit` is known to (see `install-blockless.zsh`'s own comment
+            // on why it uses that path)? If the rig ever shows the panel
+            // failing to persist across the final foreground open, this is
+            // the first place to check.
             let _ = Command::new("kill")
                 .args(["-TERM", &pid.to_string()])
                 .status();
@@ -385,6 +396,15 @@ mod windows {
         cmd
     }
 
+    /// Escape a path for interpolation into a PowerShell single-quoted
+    /// string: doubling `'` is PowerShell's own escape for it inside a
+    /// single-quoted literal. Without this, a path containing `'` (rare but
+    /// legal in a Windows username/dir name) breaks out of the string and
+    /// its trailing text is interpreted as script rather than data.
+    fn ps_quote(path: &Path) -> String {
+        path.display().to_string().replace('\'', "''")
+    }
+
     impl CommandRunner for WindowsEnvironment {
         fn running_vscode_pids(&self) -> Vec<u32> {
             let Some(out) = stdout_of(&mut powershell(
@@ -457,11 +477,16 @@ mod windows {
             // windows crate's WinVerifyTrust binding -- a deliberate,
             // flagged deviation, not a weaker check.
             let script = format!(
-                "$sig = Get-AuthenticodeSignature '{}'; \
+                // -LiteralPath, not the positional/-FilePath binding: -FilePath
+                // is wildcard-capable, so a path containing `[`/`]` (legal in
+                // a Windows username) would resolve as a character class
+                // instead of matching itself literally -- same class as the
+                // Expand-Archive fix above.
+                "$sig = Get-AuthenticodeSignature -LiteralPath '{}'; \
                  if ($sig.Status -ne 'Valid') {{ exit 1 }}; \
                  if ($sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation(,|$)') {{ exit 1 }}; \
                  exit 0",
-                artifact.display()
+                ps_quote(artifact)
             );
             if run_ok(&mut powershell(&script)) {
                 Ok(())
@@ -509,9 +534,14 @@ mod windows {
         fn extract_uv(&self, archive: &Path, dest_dir: &Path) -> Result<(), String> {
             std::fs::create_dir_all(dest_dir).map_err(|e| e.to_string())?;
             let script = format!(
-                "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
-                archive.display(),
-                dest_dir.display()
+                // -LiteralPath, not -Path: -Path is wildcard-capable, so a
+                // path containing `[`/`]` (legal in a Windows username, and
+                // otherwise indistinguishable from an intentional glob)
+                // would resolve as a character class instead of matching
+                // itself literally.
+                "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
+                ps_quote(archive),
+                ps_quote(dest_dir)
             );
             if !run_ok(&mut powershell(&script)) {
                 return Err(format!("Expand-Archive {} failed", archive.display()));
@@ -568,5 +598,31 @@ mod windows {
             "{name} not found in the extracted archive at {} (neither flat nor one level nested)",
             dest_dir.display()
         ))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn ps_quote_doubles_embedded_single_quotes() {
+            assert_eq!(
+                ps_quote(Path::new(r"C:\Users\it's me\code")),
+                r"C:\Users\it''s me\code"
+            );
+        }
+
+        #[test]
+        fn ps_quote_is_identity_on_a_quote_free_path() {
+            assert_eq!(
+                ps_quote(Path::new(r"C:\Users\normal\code")),
+                r"C:\Users\normal\code"
+            );
+        }
+
+        #[test]
+        fn ps_quote_handles_multiple_quotes() {
+            assert_eq!(ps_quote(Path::new("a'b'c")), "a''b''c");
+        }
     }
 }

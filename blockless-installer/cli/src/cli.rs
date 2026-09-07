@@ -16,7 +16,9 @@ pub struct Cli {
     /// alongside this binary.
     #[arg(long, global = true)]
     pub manifest: Option<PathBuf>,
-    /// Override path to the bundled Blockless extension VSIX.
+    /// Path to the bundled Blockless extension VSIX. Required (no default)
+    /// for install/repair/update-extension; unused by repair-runtime/verify/
+    /// diagnostics/uninstall.
     #[arg(long, global = true)]
     pub vsix: Option<PathBuf>,
     #[command(subcommand)]

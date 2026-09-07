@@ -354,6 +354,30 @@ mod tests {
         assert_eq!(manifest.components.python_extension.id, "ms-python.python");
     }
 
+    /// Both `components.uv.sha256.*` (all 4 platforms) and
+    /// `components.extension.sha256` are deliberate all-zero placeholders in
+    /// the committed manifest -- release-assets.githubusercontent.com and
+    /// the real VSIX build were both unreachable/unavailable at commit time
+    /// (see STATUS.json's issues), so shipping a wrong-but-plausible-looking
+    /// digest would be worse than shipping one that visibly refuses every
+    /// real download/install (`fetch::fetch_and_verify` /
+    /// `extensions::ensure_extensions`'s `VsixShaMismatch`, both fail
+    /// closed). This test is the canary: it fails the moment either group
+    /// gets stamped with a real value without this test being updated to
+    /// match, so the placeholder state can never silently persist unnoticed
+    /// -- see `extension.sha256`'s equivalent ops-level canary in
+    /// `ops::tests::install_against_the_unmodified_committed_manifest_refuses_the_real_vsix`.
+    #[test]
+    fn committed_manifest_sha256_pins_are_still_the_documented_placeholder() {
+        let manifest = Manifest::parse(COMMITTED_MANIFEST).unwrap();
+        let placeholder = "0".repeat(64);
+        assert_eq!(manifest.components.uv.sha256.darwin_aarch64, placeholder);
+        assert_eq!(manifest.components.uv.sha256.darwin_x86_64, placeholder);
+        assert_eq!(manifest.components.uv.sha256.win32_x64, placeholder);
+        assert_eq!(manifest.components.uv.sha256.win32_arm64, placeholder);
+        assert_eq!(manifest.components.extension.sha256, placeholder);
+    }
+
     #[test]
     fn parses_every_source_kind() {
         let manifest = Manifest::parse(COMMITTED_MANIFEST).unwrap();

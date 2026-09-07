@@ -63,6 +63,13 @@ pub enum OpsError {
     RemoveEnv { path: PathBuf, reason: String },
     #[error("could not build diagnostics bundle: {0}")]
     Diagnostics(String),
+    /// Checked upfront, before step 1 runs: without it, a run can seed or
+    /// adopt a profile in step 1/2 and only then fail in extensions.rs's own
+    /// `MissingBundledVsix`, permanently misattributing `profileCreatedByUs`
+    /// (or leaving VS Code installed) for a run that could never have
+    /// finished. M0 checks this before doing anything too.
+    #[error("no bundled VSIX at {0}; pass --vsix")]
+    MissingVsix(PathBuf),
 }
 
 /// Everything an op needs about this machine + this manifest, resolved
@@ -109,9 +116,28 @@ fn stamp_and_write(state: &mut State, path: &Path) -> Result<(), OpsError> {
     Ok(())
 }
 
+/// Checked before any step runs in ops that touch extensions
+/// (`install`/`repair`/`update_extension`): our extension only ever installs
+/// from this bundled VSIX (never the Marketplace, see `extensions.rs`), so a
+/// missing one can never let the run finish. Failing here -- before step 1
+/// -- rather than inside `extensions.rs`'s own `MissingBundledVsix` avoids a
+/// run that seeds or adopts a profile (and possibly installs VS Code) in
+/// steps 1/2, only to fail with no path forward except a full re-run.
+fn require_vsix(ctx: &OpsContext) -> Result<(), OpsError> {
+    match ctx.vsix_path.as_deref() {
+        Some(p) if p.exists() => Ok(()),
+        _ => Err(OpsError::MissingVsix(
+            ctx.vsix_path
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("(none supplied)")),
+        )),
+    }
+}
+
 /// Steps 1, 2, 4 (never 3/runtime) -- ports `repair`'s scope exactly:
 /// detect-skip-do on VS Code, the extension, and settings.
 pub fn repair(env: &dyn Environment, ctx: &OpsContext) -> Result<State, OpsError> {
+    require_vsix(ctx)?;
     let prior = read_prior_state_lenient(&ctx.paths.state);
     let seed = state::seed_from_prior(prior.as_ref(), "blockless");
     let mut current = prior.unwrap_or_default();
@@ -144,6 +170,7 @@ pub fn repair(env: &dyn Environment, ctx: &OpsContext) -> Result<State, OpsError
         &ctx.manifest.components.python_extension.id,
         PYLANCE_ID,
         ctx.vsix_path.as_deref(),
+        &ctx.manifest.components.extension.sha256,
         &seed.prior_ext_vsix_sha256,
         seed.profile_created_by_us,
         false,
@@ -181,9 +208,18 @@ pub fn repair(env: &dyn Environment, ctx: &OpsContext) -> Result<State, OpsError
 /// (1, 2, 4) then 3 tacked on, so a fresh machine's env_python already
 /// exists by the time step 4 writes `mpyhw.pythonPath`.
 pub fn install(env: &dyn Environment, ctx: &OpsContext) -> Result<State, OpsError> {
+    require_vsix(ctx)?;
     let prior = read_prior_state_lenient(&ctx.paths.state);
     let seed = state::seed_from_prior(prior.as_ref(), "blockless");
     let mut current = prior.unwrap_or_default();
+    // `install` always re-attempts all four steps, unlike `repair`/
+    // `repair_runtime` which intentionally touch only a subset -- so unlike
+    // those, a prior journal's step flags carry no meaning for THIS run and
+    // must not survive into it. Without this reset, an incremental write
+    // from an early step (still holding the stale prior flags for steps not
+    // yet reached) can leave e.g. a stale `steps.python: true` on disk if
+    // this run then dies before actually re-verifying that step.
+    current.steps = state::Steps::default();
     current.profile_location = seed.profile_location.clone();
     current.mpremote_version = ctx.manifest.components.mpremote.version.clone();
     current.env_python = ctx.paths.env_python.to_string_lossy().into_owned();
@@ -215,6 +251,7 @@ pub fn install(env: &dyn Environment, ctx: &OpsContext) -> Result<State, OpsErro
         &ctx.manifest.components.python_extension.id,
         PYLANCE_ID,
         ctx.vsix_path.as_deref(),
+        &ctx.manifest.components.extension.sha256,
         &seed.prior_ext_vsix_sha256,
         seed.profile_created_by_us,
         false,
@@ -313,6 +350,7 @@ pub fn repair_runtime(env: &dyn Environment, ctx: &OpsContext) -> Result<State, 
 /// Force-reinstall the bundled VSIX regardless of the sha-match skip, and
 /// re-journal the sha. Steps 1/3/4 are untouched.
 pub fn update_extension(env: &dyn Environment, ctx: &OpsContext) -> Result<State, OpsError> {
+    require_vsix(ctx)?;
     let prior = read_prior_state_lenient(&ctx.paths.state);
     let seed = state::seed_from_prior(prior.as_ref(), "blockless");
     let mut current = prior.unwrap_or_default();
@@ -336,6 +374,7 @@ pub fn update_extension(env: &dyn Environment, ctx: &OpsContext) -> Result<State
         &ctx.manifest.components.python_extension.id,
         PYLANCE_ID,
         ctx.vsix_path.as_deref(),
+        &ctx.manifest.components.extension.sha256,
         &seed.prior_ext_vsix_sha256,
         seed.profile_created_by_us,
         true, // force: bypass the sha-match skip
@@ -425,16 +464,7 @@ pub fn uninstall(
     ctx: &OpsContext,
     flags: &UninstallFlags,
 ) -> UninstallOutcome {
-    // Derive the VS Code install root from whichever candidate is actually
-    // runnable right now (mirrors how every other op resolves it), rather
-    // than assuming a fixed mac target index or hand-listing a Windows path
-    // separately -- one derivation, correct on both OSes.
-    let vscode_dir = ctx
-        .code_candidates
-        .iter()
-        .find(|c| env.version(c).is_some())
-        .and_then(|working_cli| vscode_app_root(ctx.os, working_cli))
-        .unwrap_or_default(); // nothing resolvable: PathBuf::new() never exists, so nothing gets touched
+    let vscode_dirs = vscode_install_locations(env, ctx);
     uninstall::uninstall(
         env,
         env,
@@ -443,9 +473,35 @@ pub fn uninstall(
         &ctx.profiles_dir(),
         &ctx.manifest.profile_name,
         &ctx.paths.blk,
-        &vscode_dir,
+        &vscode_dirs,
         flags,
     )
+}
+
+/// Every location this OS's install could plausibly have put VS Code, not
+/// just whichever candidate happens to be runnable right now -- a broken or
+/// stale `code` CLI must not leave a real install undetected by uninstall.
+/// Mac: every `mac_install_targets` entry joined with the app bundle name
+/// directly (matches `vscode.rs`'s own writability-fallback candidates
+/// one-to-one, independent of runnability -- up to two real locations).
+/// Windows: derived from whichever candidate is currently runnable, since
+/// there is only ever one Windows install location and no equivalent
+/// fixed-targets list to enumerate instead.
+fn vscode_install_locations(env: &dyn Environment, ctx: &OpsContext) -> Vec<PathBuf> {
+    match ctx.os {
+        Os::MacOs => ctx
+            .mac_install_targets
+            .iter()
+            .map(|t| t.join("Visual Studio Code.app"))
+            .collect(),
+        Os::Windows => ctx
+            .code_candidates
+            .iter()
+            .find(|c| env.version(c).is_some())
+            .and_then(|working_cli| vscode_app_root(ctx.os, working_cli))
+            .into_iter()
+            .collect(),
+    }
 }
 
 /// The VS Code install root from its `code` CLI path: mac
@@ -507,8 +563,14 @@ mod tests {
         install_calls: RefCell<Vec<String>>,
         mpremote_version: RefCell<Option<String>>,
         run_uv_calls: RefCell<u32>,
+        run_uv_fails: RefCell<bool>,
         remove_dir_calls: RefCell<Vec<PathBuf>>,
         spawn_calls: RefCell<Vec<Vec<String>>>,
+        /// Overridable so a test can simulate "VS Code is already running"
+        /// (e.g. to force `register_profile_offline` to skip seeding
+        /// `storage.json`, leaving `resolve_profile_location` unable to
+        /// resolve anything this run).
+        running_pids: RefCell<Vec<u32>>,
     }
 
     impl FakeEnvironment {
@@ -522,15 +584,17 @@ mod tests {
                 install_calls: RefCell::new(Vec::new()),
                 mpremote_version: RefCell::new(Some("mpremote 1.28.0".to_string())),
                 run_uv_calls: RefCell::new(0),
+                run_uv_fails: RefCell::new(false),
                 remove_dir_calls: RefCell::new(Vec::new()),
                 spawn_calls: RefCell::new(Vec::new()),
+                running_pids: RefCell::new(Vec::new()),
             }
         }
     }
 
     impl profile::CommandRunner for FakeEnvironment {
         fn running_vscode_pids(&self) -> Vec<u32> {
-            vec![]
+            self.running_pids.borrow().clone()
         }
         fn spawn(&self, _code_cli: &Path, args: &[&str]) -> std::io::Result<u32> {
             self.spawn_calls
@@ -608,6 +672,9 @@ mod tests {
         }
         fn run_uv(&self, _uv_bin: &Path, _args: &[&str], _env: &[(&str, &str)]) -> bool {
             *self.run_uv_calls.borrow_mut() += 1;
+            if *self.run_uv_fails.borrow() {
+                return false;
+            }
             // the third call in the fixed sequence (python install, venv,
             // pip install) is what "lands" mpremote
             if *self.run_uv_calls.borrow() == 3 {
@@ -636,6 +703,25 @@ mod tests {
         let path = dir.join("mpy-hardware-extension.vsix");
         std::fs::write(&path, contents).unwrap();
         path
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(bytes);
+        h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// The committed manifest's `extension.sha256` is an all-zero placeholder
+    /// (the real VSIX's hash is unknown at commit time). Tests that exercise
+    /// a real install path need a manifest that actually matches their own
+    /// fixture VSIX, or `ensure_extensions`'s authenticity check (the
+    /// bundled VSIX's hash must match the manifest's declared value, not
+    /// just the journaled prior sha) correctly refuses every one of them.
+    fn test_manifest_matching(vsix_bytes: &[u8]) -> Manifest {
+        let mut manifest = test_manifest();
+        manifest.components.extension.sha256 = sha256_hex(vsix_bytes);
+        manifest
     }
 
     fn make_ctx<'a>(dir: &Path, manifest: &'a Manifest, vsix: &Path) -> OpsContext<'a> {
@@ -667,7 +753,7 @@ mod tests {
     #[test]
     fn install_happy_path_journals_all_four_steps_and_opens_foreground() {
         let dir = temp_dir("install-happy");
-        let manifest = test_manifest();
+        let manifest = test_manifest_matching(b"vsix contents");
         let vsix = write_vsix(&dir, b"vsix contents");
         let ctx = make_ctx(&dir, &manifest, &vsix);
         let env = FakeEnvironment::new(&ctx.code_candidates[0], &vsix);
@@ -688,7 +774,7 @@ mod tests {
     #[test]
     fn repair_never_touches_runtime() {
         let dir = temp_dir("repair-no-runtime");
-        let manifest = test_manifest();
+        let manifest = test_manifest_matching(b"vsix contents");
         let vsix = write_vsix(&dir, b"vsix contents");
         let ctx = make_ctx(&dir, &manifest, &vsix);
         let env = FakeEnvironment::new(&ctx.code_candidates[0], &vsix);
@@ -736,7 +822,7 @@ mod tests {
     #[test]
     fn update_extension_forces_reinstall_bypassing_the_sha_match_skip() {
         let dir = temp_dir("update-ext-force");
-        let manifest = test_manifest();
+        let manifest = test_manifest_matching(b"vsix contents");
         let vsix = write_vsix(&dir, b"vsix contents");
         let sha = {
             use sha2::{Digest, Sha256};
@@ -776,6 +862,270 @@ mod tests {
             "force must reinstall even though the sha already matched"
         );
         assert_eq!(state.ext_vsix_sha256, sha);
+    }
+
+    #[test]
+    fn install_resets_stale_steps_so_an_aborted_run_never_journals_a_step_it_never_reverified() {
+        // A prior COMPLETE install left every step true. If this run then
+        // dies during step 3 (runtime), the incremental writes from steps 1
+        // and 2 (persisted before step 3 is even attempted) must not carry
+        // the stale `steps.python: true` forward -- otherwise `verify`'s
+        // check 5 would pass against a runtime this run never actually
+        // re-confirmed.
+        let dir = temp_dir("install-resets-steps");
+        let manifest = test_manifest_matching(b"vsix contents");
+        let vsix = write_vsix(&dir, b"vsix contents");
+        let ctx = make_ctx(&dir, &manifest, &vsix);
+        std::fs::create_dir_all(&ctx.paths.blk).unwrap();
+        let prior = State {
+            steps: crate::state::Steps {
+                vscode: true,
+                extension: true,
+                python: true,
+                settings: true,
+            },
+            ..Default::default()
+        };
+        prior.write(&ctx.paths.state).unwrap();
+        let env = FakeEnvironment::new(&ctx.code_candidates[0], &vsix);
+        // force step 3 to fail so the run dies before its own
+        // `current.steps.python = true` write -- only the STALE prior value
+        // could end up on disk at that point if the reset didn't happen.
+        *env.mpremote_version.borrow_mut() = None;
+        *env.run_uv_fails.borrow_mut() = true;
+
+        let result = install(&env, &ctx);
+
+        assert!(result.is_err(), "test setup: step 3 must actually fail");
+        let persisted = State::read(&ctx.paths.state).unwrap().unwrap();
+        assert!(
+            persisted.steps.vscode && persisted.steps.extension,
+            "steps this run genuinely completed must still be journaled true"
+        );
+        assert!(
+            !persisted.steps.python,
+            "steps.python must not carry forward stale from the prior \
+             journal when this run never got to re-verify it"
+        );
+    }
+
+    #[test]
+    fn install_against_the_unmodified_committed_manifest_refuses_the_real_vsix() {
+        // The committed manifest's `extension.sha256` is a deliberate
+        // all-zero placeholder (the real VSIX's hash is unknown at commit
+        // time -- release-assets.githubusercontent.com and the real VSIX
+        // build were both unavailable then; see STATUS.json's issues and
+        // `mpy-hardware-extension/scripts/stamp-installer-manifest.mjs`,
+        // which stamps the real value in outside this repo before a real
+        // rig run). This is a WIRING test, not a placeholder canary by
+        // itself: it proves `ops.rs` actually passes
+        // `manifest.components.extension.sha256` through to
+        // `ensure_extensions` end to end (a fixture vsix, `b"vsix
+        // contents"`, would refuse against ANY manifest sha it doesn't
+        // equal -- placeholder or a real one that just doesn't match this
+        // fixture). `manifest::tests::committed_manifest_sha256_pins_are_still_the_documented_placeholder`
+        // is the actual canary that fails the moment the pin gets stamped
+        // without a matching test update.
+        let dir = temp_dir("unmodified-manifest-refuses-real-vsix");
+        let manifest = test_manifest(); // NOT test_manifest_matching -- the real, unmodified file
+        let vsix = write_vsix(&dir, b"vsix contents");
+        let ctx = make_ctx(&dir, &manifest, &vsix);
+        let env = FakeEnvironment::new(&ctx.code_candidates[0], &vsix);
+
+        let err = install(&env, &ctx).unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                OpsError::Extensions(ExtensionsError::VsixShaMismatch { .. })
+            ),
+            "expected VsixShaMismatch against the placeholder sha, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn install_refuses_a_missing_vsix_before_any_step_runs() {
+        let dir = temp_dir("missing-vsix-upfront");
+        let manifest = test_manifest_matching(b"vsix contents");
+        let missing = dir.join("does-not-exist.vsix");
+        let ctx = make_ctx(&dir, &manifest, &missing);
+        let env = FakeEnvironment::new(&ctx.code_candidates[0], &missing);
+
+        let err = install(&env, &ctx).unwrap_err();
+
+        assert!(matches!(err, OpsError::MissingVsix(p) if p == missing));
+        assert!(
+            env.spawn_calls.borrow().is_empty(),
+            "must never spawn/register a profile when the vsix is missing"
+        );
+        assert!(
+            !ctx.paths.state.exists(),
+            "must never journal any step (not even step 1) before the vsix check"
+        );
+    }
+
+    #[test]
+    fn repair_and_update_extension_also_refuse_a_missing_vsix_upfront() {
+        let dir = temp_dir("missing-vsix-upfront-others");
+        let manifest = test_manifest_matching(b"vsix contents");
+        let missing = dir.join("does-not-exist.vsix");
+        let ctx = make_ctx(&dir, &manifest, &missing);
+        let env = FakeEnvironment::new(&ctx.code_candidates[0], &missing);
+
+        assert!(matches!(
+            repair(&env, &ctx).unwrap_err(),
+            OpsError::MissingVsix(p) if p == missing
+        ));
+        assert!(matches!(
+            update_extension(&env, &ctx).unwrap_err(),
+            OpsError::MissingVsix(p) if p == missing
+        ));
+    }
+
+    type OpFn = fn(&dyn Environment, &OpsContext) -> Result<State, OpsError>;
+
+    /// `repair` and `install` both re-derive `vscode_installed_by_us` and
+    /// `profile_location` with the byte-identical carry-forward expressions
+    /// (`ops.rs`'s repair/install bodies are intentionally parallel) -- a
+    /// round-2 review proved by mutation that testing only `repair` left
+    /// `install`'s copy of each expression uncovered (both mutations shipped
+    /// silently under the full suite). Every invariant test below runs
+    /// against both ops, not just one.
+    const CARRY_FORWARD_OPS: [(&str, OpFn); 2] = [("repair", repair), ("install", install)];
+
+    #[test]
+    fn vscode_installed_by_us_stays_sticky_true_across_a_skip_run() {
+        // Mutation-tested against the reviewer's own finding: replacing
+        // `seed.vscode_installed_by_us || vscode_outcome.installed_by_us`
+        // with just `vscode_outcome.installed_by_us` left every existing
+        // test green, because none of them seeded a prior journal with the
+        // flag already true. This run's own step 1 detects VS Code already
+        // present (a skip -- `installed_by_us` is false for THIS run), so
+        // only the sticky carry-forward from the prior journal can be what
+        // keeps the flag true.
+        for (op_name, op) in CARRY_FORWARD_OPS {
+            let dir = temp_dir(&format!("vscode-sticky-{op_name}"));
+            let manifest = test_manifest_matching(b"vsix contents");
+            let vsix = write_vsix(&dir, b"vsix contents");
+            let ctx = make_ctx(&dir, &manifest, &vsix);
+            std::fs::create_dir_all(&ctx.paths.blk).unwrap();
+            let prior = State {
+                vscode_installed_by_us: true,
+                ..Default::default()
+            };
+            prior.write(&ctx.paths.state).unwrap();
+            let env = FakeEnvironment::new(&ctx.code_candidates[0], &vsix);
+
+            let state = op(&env, &ctx).unwrap();
+
+            assert!(
+                state.vscode_installed_by_us,
+                "{op_name}: a prior true must survive a run whose own step 1 was a skip"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_location_survives_step_2_when_storage_json_never_resolves() {
+        // Mutation-tested against the reviewer's own finding: replacing the
+        // guarded `if let Some(loc) = resolve_profile_location(..) { current
+        // .profile_location = loc }` (right after step 2) with an
+        // unconditional `.unwrap_or_default()` (blanking a known-good id
+        // whenever resolution fails) left every existing test green too,
+        // because none of them exercised a run where step 2 completes
+        // without ever producing a resolvable storage.json entry.
+        //
+        // Simulated by reporting VS Code as already running: extensions.rs's
+        // `register_profile_offline` then skips seeding storage.json, and
+        // since this fake's extension installs always succeed, the
+        // window-registration fallback (which would otherwise create the
+        // entry) never triggers either -- so storage.json stays entryless
+        // through the point ops.rs's step-2 carry-forward check runs.
+        //
+        // The run as a whole still fails (settings.rs's OWN fallback also
+        // can't resolve a profile against a fake that never actually writes
+        // storage.json), so this asserts against the state.json PERSISTED
+        // right after step 2 -- exactly the incremental write the carry-
+        // forward check protects -- rather than repair()'s return value.
+        for (op_name, op) in CARRY_FORWARD_OPS {
+            let dir = temp_dir(&format!("profile-location-survives-{op_name}"));
+            let manifest = test_manifest_matching(b"vsix contents");
+            let vsix = write_vsix(&dir, b"vsix contents");
+            let ctx = make_ctx(&dir, &manifest, &vsix);
+            std::fs::create_dir_all(&ctx.paths.blk).unwrap();
+            let prior = State {
+                profile_location: "a1b2c3d4e5f6".to_string(),
+                ..Default::default()
+            };
+            prior.write(&ctx.paths.state).unwrap();
+            let env = FakeEnvironment::new(&ctx.code_candidates[0], &vsix);
+            *env.running_pids.borrow_mut() = vec![4242];
+
+            let result = op(&env, &ctx);
+
+            assert!(
+                result.is_err(),
+                "{op_name}: expected settings.rs to also fail to resolve a profile \
+                 against a fake that never writes storage.json (test setup check)"
+            );
+            assert!(
+                !ctx.paths.storage.exists(),
+                "{op_name}: storage.json must never have been written before step 2's \
+                 incremental write (test setup check)"
+            );
+            let persisted = State::read(&ctx.paths.state).unwrap().unwrap();
+            assert_eq!(
+                persisted.profile_location, "a1b2c3d4e5f6",
+                "{op_name}: a known-good prior location must survive step 2's incremental \
+                 write when step 2 never resolved a fresh one"
+            );
+        }
+    }
+
+    #[test]
+    fn ext_vsix_sha256_survives_step_1_when_step_2_never_completes() {
+        // The third carry-forward invariant `scope.md`'s review focus names
+        // alongside `vscodeInstalledByUs`/`profileLocation`
+        // (`extVsixSha256`) had zero ops-level coverage: `current =
+        // prior.unwrap_or_default()` carries it through every incremental
+        // write until step 2 explicitly overwrites it, but nothing asserted
+        // that a run whose step 2 never REACHES that overwrite still leaves
+        // the prior value on disk after step 1's write. Forced here by
+        // using the real (unmodified, placeholder-sha) committed manifest
+        // against a fixture vsix that can never match it: `ensure_extensions`
+        // refuses with `VsixShaMismatch` before touching
+        // `ext_vsix_sha256` at all, so step 1's persisted state is the last
+        // word.
+        for (op_name, op) in CARRY_FORWARD_OPS {
+            let dir = temp_dir(&format!("ext-sha-survives-step1-{op_name}"));
+            let manifest = test_manifest(); // NOT test_manifest_matching -- placeholder sha
+            let vsix = write_vsix(&dir, b"vsix contents");
+            let ctx = make_ctx(&dir, &manifest, &vsix);
+            std::fs::create_dir_all(&ctx.paths.blk).unwrap();
+            let prior = State {
+                ext_vsix_sha256: "deadbeef".to_string(),
+                ..Default::default()
+            };
+            prior.write(&ctx.paths.state).unwrap();
+            let env = FakeEnvironment::new(&ctx.code_candidates[0], &vsix);
+
+            let err = op(&env, &ctx).unwrap_err();
+
+            assert!(
+                matches!(
+                    err,
+                    OpsError::Extensions(ExtensionsError::VsixShaMismatch { .. })
+                ),
+                "{op_name}: expected step 2 to refuse before touching ext_vsix_sha256 \
+                 (test setup check), got {err:?}"
+            );
+            let persisted = State::read(&ctx.paths.state).unwrap().unwrap();
+            assert_eq!(
+                persisted.ext_vsix_sha256, "deadbeef",
+                "{op_name}: a known-good prior sha must survive step 1's incremental \
+                 write when step 2 never reached its own overwrite"
+            );
+        }
     }
 
     #[test]

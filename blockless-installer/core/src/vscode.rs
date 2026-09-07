@@ -51,7 +51,13 @@ pub enum VscodeError {
     /// (trust-on-first-use): it catches a corrupt/MITM'd download, not a
     /// compromised API response serving a malicious URL + its own matching
     /// digest. The signature chains to Apple/Microsoft independent of that
-    /// response, so it gates before anything is extracted or executed.
+    /// response. On Windows it gates the downloaded installer exe before
+    /// that exe is ever run. On mac, `codesign --verify` only understands an
+    /// extracted `.app` bundle, not a zip, so it gates after `ditto` extracts
+    /// the archive but strictly before quarantine is stripped or the binary
+    /// is ever invoked -- a failed check here leaves an
+    /// extracted-but-unverified, still-quarantined bundle on disk and
+    /// returns an error without ever detecting or launching it.
     #[error("VS Code artifact failed signature verification: {0}")]
     Signature(SignatureError),
     #[error("no writable install target (tried: {0:?})")]
@@ -83,8 +89,11 @@ pub trait VscodeInstaller {
     fn run_silent_installer(&self, installer_exe: &Path) -> Result<(), InstallError>;
     /// Authenticate the artifact against its OS-native signing chain (mac: a
     /// codesign REQUIREMENT string anchored to Apple + pinned to Microsoft's
-    /// Team ID leaf OU; Windows: `WinVerifyTrust` + a subject pin on
-    /// `O=Microsoft Corporation`). Never weakened to a bare integrity check.
+    /// Team ID leaf OU, run against the extracted `.app` bundle -- `codesign
+    /// --verify` only understands bundles, not zip archives; Windows:
+    /// `WinVerifyTrust` + a subject pin on `O=Microsoft Corporation`, run
+    /// against the downloaded installer exe directly). Never weakened to a
+    /// bare integrity check.
     fn verify_signature(&self, artifact: &Path) -> Result<(), SignatureError>;
 }
 
@@ -168,12 +177,20 @@ pub fn ensure_vscode(
         fetch_opts,
     )?;
 
-    installer
-        .verify_signature(&archive_path)
-        .map_err(VscodeError::Signature)?;
-
     match os {
         Os::MacOs => {
+            // `codesign --verify` authenticates a bundle, not a zip -- extract
+            // first, then gate on the extracted `.app` before THIS run ever
+            // strips quarantine from it or invokes `--version` on it. A
+            // failed check here leaves an extracted-but-unverified, still-
+            // quarantined bundle on disk (matching M0: the script `die`s at
+            // this point too, with the same residue) -- this run never
+            // launches it, but a LATER run's `detect()` (which only checks
+            // `--version`, not the signature) would happily adopt it as
+            // "already installed" if the user re-runs. Quarantine staying
+            // in place is the only thing standing between that and a
+            // Gatekeeper-blocked launch.
+
             let target = mac_install_targets
                 .iter()
                 .find(|t| installer.is_writable(t))
@@ -184,9 +201,18 @@ pub fn ensure_vscode(
                 .extract_archive(&archive_path, target)
                 .map_err(VscodeError::Install)?;
             let app_dir = target.join("Visual Studio Code.app");
+            installer
+                .verify_signature(&app_dir)
+                .map_err(VscodeError::Signature)?;
             installer.strip_quarantine(&app_dir);
         }
         Os::Windows => {
+            // The downloaded installer exe is itself what's signed and what
+            // gets executed, so the check stays on `archive_path` and runs
+            // before it is ever invoked.
+            installer
+                .verify_signature(&archive_path)
+                .map_err(VscodeError::Signature)?;
             installer
                 .run_silent_installer(&archive_path)
                 .map_err(VscodeError::Install)?;
@@ -329,6 +355,7 @@ mod tests {
         strip_quarantine_calls: RefCell<Vec<PathBuf>>,
         run_installer_calls: RefCell<Vec<PathBuf>>,
         verify_signature_calls: RefCell<u32>,
+        verify_signature_artifacts: RefCell<Vec<PathBuf>>,
         /// Version to report AFTER extract_archive/run_silent_installer runs
         /// (simulating "now it's really installed").
         post_install_version: RefCell<Option<String>>,
@@ -344,6 +371,7 @@ mod tests {
                 strip_quarantine_calls: RefCell::new(Vec::new()),
                 run_installer_calls: RefCell::new(Vec::new()),
                 verify_signature_calls: RefCell::new(0),
+                verify_signature_artifacts: RefCell::new(Vec::new()),
                 post_install_version: RefCell::new(None),
             }
         }
@@ -383,8 +411,11 @@ mod tests {
             }
             Ok(())
         }
-        fn verify_signature(&self, _artifact: &Path) -> Result<(), SignatureError> {
+        fn verify_signature(&self, artifact: &Path) -> Result<(), SignatureError> {
             *self.verify_signature_calls.borrow_mut() += 1;
+            self.verify_signature_artifacts
+                .borrow_mut()
+                .push(artifact.to_path_buf());
             self.verify_signature_result
                 .borrow()
                 .clone()
@@ -472,6 +503,10 @@ mod tests {
     #[test]
     fn signature_check_gate_blocks_install_even_with_correct_sha() {
         let installer = FakeInstaller::default();
+        installer
+            .writable
+            .borrow_mut()
+            .push(PathBuf::from("/Applications"));
         *installer.verify_signature_result.borrow_mut() =
             Err("not signed by Microsoft".to_string());
         let client = reqwest::blocking::Client::new();
@@ -479,13 +514,14 @@ mod tests {
         let body = b"a totally real vs code zip".to_vec();
         let sha = sha256_hex(&body);
         let (meta_server, _binary_server) = servers_for(body, &sha, "1.99.0");
+        let targets = vec![PathBuf::from("/Applications")];
 
         let outcome = ensure_vscode(
             &installer,
             &client,
             Os::MacOs,
             &candidates(),
-            &[],
+            &targets,
             &meta_server.url("/meta"),
             &dir,
             &fast_opts(),
@@ -497,8 +533,58 @@ mod tests {
         }
         assert_eq!(*installer.verify_signature_calls.borrow(), 1);
         assert!(
-            installer.extract_calls.borrow().is_empty(),
-            "must never extract an unauthenticated artifact"
+            installer.strip_quarantine_calls.borrow().is_empty(),
+            "a failed signature check must never reach quarantine-stripping"
+        );
+        assert_eq!(
+            installer.extract_calls.borrow().len(),
+            1,
+            "mac extracts before verifying (codesign needs a bundle, not a \
+             zip) -- the archive was extracted but never trusted further"
+        );
+    }
+
+    #[test]
+    fn mac_signature_check_targets_the_extracted_app_not_the_zip() {
+        let installer = FakeInstaller::default();
+        installer
+            .writable
+            .borrow_mut()
+            .push(PathBuf::from("/Applications"));
+        *installer.verify_signature_result.borrow_mut() = Ok(());
+        *installer.post_install_version.borrow_mut() = Some("1.99.0".to_string());
+        let client = reqwest::blocking::Client::new();
+        let dir = temp_dir("sig-targets-app");
+        let body = b"a totally real vs code zip".to_vec();
+        let sha = sha256_hex(&body);
+        let (meta_server, _binary_server) = servers_for(body, &sha, "1.99.0");
+        let targets = vec![PathBuf::from("/Applications")];
+
+        ensure_vscode(
+            &installer,
+            &client,
+            Os::MacOs,
+            &candidates(),
+            &targets,
+            &meta_server.url("/meta"),
+            &dir,
+            &fast_opts(),
+        )
+        .unwrap();
+
+        let sig_artifacts = installer.verify_signature_artifacts.borrow();
+        assert_eq!(sig_artifacts.len(), 1);
+        assert_eq!(
+            sig_artifacts[0],
+            PathBuf::from("/Applications/Visual Studio Code.app"),
+            "must verify the extracted .app bundle, not the downloaded zip -- \
+             codesign --verify only understands bundles"
+        );
+        assert_eq!(
+            installer.extract_calls.borrow().len(),
+            1,
+            "extraction happens before the signature check on mac (codesign \
+             needs an extracted bundle to inspect)"
         );
     }
 

@@ -32,6 +32,20 @@ pub enum ExtensionsError {
         #[source]
         source: std::io::Error,
     },
+    /// The bundled VSIX's own hash never matched what the manifest declares
+    /// for it. `prior_ext_vsix_sha256` (the journaled sha from our OWN last
+    /// install) only detects drift against ourselves -- it has nothing to
+    /// say about whether the file on disk right now is the one the manifest
+    /// actually shipped. This is the authenticity check the manifest's
+    /// `components.extension.sha256` field exists for.
+    #[error(
+        "bundled VSIX at {path} does not match the manifest: expected sha256 {expected}, got {actual}"
+    )]
+    VsixShaMismatch {
+        path: PathBuf,
+        expected: String,
+        actual: String,
+    },
 }
 
 /// `code` CLI operations this step needs, injected so it is unit-testable
@@ -152,10 +166,14 @@ pub struct ExtensionsStepOutcome {
 /// The full step. `seed_profile_created_by_us` is the sticky carry-forward
 /// from `state.rs` (already true on a repair run where we made the profile
 /// last time); `prior_ext_vsix_sha256` is the sha this run started with
-/// (`state::Seed::prior_ext_vsix_sha256`). `force`: bypass the currency
-/// skip and reinstall our extension unconditionally -- `ops::update_extension`
-/// sets this so a forced update actually forces, rather than silently
-/// no-op'ing when the sha already happens to match.
+/// (`state::Seed::prior_ext_vsix_sha256`). `expected_vsix_sha256` is the
+/// manifest's declared `components.extension.sha256` -- the bundled VSIX on
+/// disk is refused before anything else if it doesn't match, so a corrupted
+/// or tampered file can never be installed just because it happens to match
+/// our own prior journal. `force`: bypass the currency skip and reinstall
+/// our extension unconditionally -- `ops::update_extension` sets this so a
+/// forced update actually forces, rather than silently no-op'ing when the
+/// sha already happens to match.
 #[allow(clippy::too_many_arguments)]
 pub fn ensure_extensions(
     command_runner: &dyn profile::CommandRunner,
@@ -169,6 +187,7 @@ pub fn ensure_extensions(
     py_ext_id: &str,
     pylance_id: &str,
     vsix_path: Option<&Path>,
+    expected_vsix_sha256: &str,
     prior_ext_vsix_sha256: &str,
     seed_profile_created_by_us: bool,
     force: bool,
@@ -177,6 +196,16 @@ pub fn ensure_extensions(
         Some(p) => sha256_of_file(p)?,
         None => String::new(),
     };
+
+    if !vsix_sha256.is_empty() && !vsix_sha256.eq_ignore_ascii_case(expected_vsix_sha256) {
+        return Err(ExtensionsError::VsixShaMismatch {
+            path: vsix_path
+                .expect("vsix_sha256 non-empty implies vsix_path was Some")
+                .to_path_buf(),
+            expected: expected_vsix_sha256.to_string(),
+            actual: vsix_sha256,
+        });
+    }
 
     // Recorded BEFORE any registration attempt below: whether WE create the
     // profile (vs adopt one that already exists), snapshotted from the
@@ -417,11 +446,40 @@ mod tests {
         )
     }
 
+    /// `expected_vsix_sha256` self-matches the given `vsix_path`'s own real
+    /// hash (the manifest, in real use, would declare exactly the file we
+    /// bundle) -- so every existing test here, none of which exercise the
+    /// manifest-authenticity check, keeps passing unmodified.
+    /// [`run_with_expected_sha`] is the one that overrides it.
     #[allow(clippy::too_many_arguments)]
     fn run_with_force(
         dir: &Path,
         ext_runner: &FakeExtensionsRunner,
         vsix_path: Option<&Path>,
+        prior_sha: &str,
+        seed_profile_created_by_us: bool,
+        force: bool,
+    ) -> Result<ExtensionsStepOutcome, ExtensionsError> {
+        let expected_sha = vsix_path
+            .map(|p| sha256_of_file(p).unwrap_or_default())
+            .unwrap_or_default();
+        run_with_expected_sha(
+            dir,
+            ext_runner,
+            vsix_path,
+            &expected_sha,
+            prior_sha,
+            seed_profile_created_by_us,
+            force,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_with_expected_sha(
+        dir: &Path,
+        ext_runner: &FakeExtensionsRunner,
+        vsix_path: Option<&Path>,
+        expected_sha: &str,
         prior_sha: &str,
         seed_profile_created_by_us: bool,
         force: bool,
@@ -440,6 +498,7 @@ mod tests {
             PY_EXT_ID,
             PYLANCE_ID,
             vsix_path,
+            expected_sha,
             prior_sha,
             seed_profile_created_by_us,
             force,
@@ -576,6 +635,44 @@ mod tests {
         assert!(
             !calls.iter().any(|c| c == EXT_ID),
             "our extension id must never be passed to install_extension directly (that would be a Marketplace install)"
+        );
+    }
+
+    #[test]
+    fn vsix_sha_mismatch_against_manifest_refuses_loudly_before_any_install_call() {
+        let dir = temp_dir("vsix-sha-mismatch");
+        // A tampered/corrupted vsix: its real bytes don't match what the
+        // manifest declares, even though nothing about the journaled prior
+        // sha (empty here -- a fresh install) would have caught it.
+        let vsix = write_vsix(&dir, b"a tampered vsix, not what we shipped");
+        let runner = FakeExtensionsRunner::new(&vsix);
+
+        let err = run_with_expected_sha(
+            &dir,
+            &runner,
+            Some(&vsix),
+            &"0".repeat(64), // manifest expects an entirely different sha
+            "",
+            false,
+            false,
+        )
+        .unwrap_err();
+
+        match err {
+            ExtensionsError::VsixShaMismatch {
+                path,
+                expected,
+                actual,
+            } => {
+                assert_eq!(path, vsix);
+                assert_eq!(expected, "0".repeat(64));
+                assert_ne!(actual, "0".repeat(64));
+            }
+            other => panic!("expected VsixShaMismatch, got {other:?}"),
+        }
+        assert!(
+            runner.install_calls.borrow().is_empty(),
+            "a tampered vsix must never be handed to install_extension"
         );
     }
 

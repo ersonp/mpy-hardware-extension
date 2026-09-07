@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Script-parity matrix: builds a faked `$HOME` fixture tree (state.json,
 //! storage.json-shaped profile settings, `pyvenv.cfg`, stub `code` and
 //! python executables) and runs BOTH the real
@@ -59,6 +60,27 @@ enum Break {
     PythonPath,
     AutoOpenPanel,
     StateSteps,
+    /// Not a "break" at all -- both sides are expected to stay green. The
+    /// extension ids the `code` CLI reports are mixed-case (VS Code itself
+    /// can report extension ids in whatever case the publisher used); both
+    /// `verify.rs` (`eq_ignore_ascii_case`) and the real script (`grep -qi`)
+    /// are supposed to treat this as present. Exercised here (not just as a
+    /// Rust unit test) so a regression in either side's case-folding shows
+    /// up as a genuine PASS/FAIL divergence against the real script.
+    ExtensionsCaseVariant,
+    /// Not a "break" either. `pyvenv.cfg`'s `home` line differs from the
+    /// real prefix only in case (APFS is case-insensitive by default, so a
+    /// real machine can produce this). Both `verify.rs`
+    /// (`env_is_contained`'s case-folded compare) and the real script
+    /// (documented case-insensitive compare at its "env base interpreter is
+    /// contained" check) must still treat it as contained.
+    EnvContainedCaseVariant,
+    /// Not a "break" -- VS Code pre-existed (this install did NOT put it
+    /// there). Distinct tree shape from `Break::None` (differs in
+    /// `vscodeInstalledByUs`, which `verify.rs`'s checks never read at all,
+    /// so this must still verify fully green on both sides) rather than a
+    /// copy of it under a different name.
+    PreexistingVscode,
 }
 
 struct Fixture {
@@ -93,10 +115,20 @@ fn build_fixture(name: &str, brk: Break) -> Fixture {
         .join("code");
 
     // --- stub `code`: --version, and --profile <name> --list-extensions ---
-    let extensions = if brk == Break::Extensions {
-        vec![EXT_ID, PY_EXT_ID] // pylance missing
+    let extensions: Vec<String> = if brk == Break::Extensions {
+        vec![EXT_ID.to_string(), PY_EXT_ID.to_string()] // pylance missing
+    } else if brk == Break::ExtensionsCaseVariant {
+        vec![
+            "Blockless.MPY-Hardware-Extension".to_string(),
+            "MS-Python.Python".to_string(),
+            "MS-Python.Vscode-Pylance".to_string(),
+        ]
     } else {
-        vec![EXT_ID, PY_EXT_ID, PYLANCE_ID]
+        vec![
+            EXT_ID.to_string(),
+            PY_EXT_ID.to_string(),
+            PYLANCE_ID.to_string(),
+        ]
     };
     // A broken code CLI bails out BEFORE printing anything (simulates a
     // binary that exits nonzero on --version); the normal case falls
@@ -145,6 +177,15 @@ exit 1
         // a sibling dir, not a real subpath -- the exact "bare prefix"
         // false-positive this check exists to reject.
         format!("{}-foreign/python/cpython-3.12.4", blk.display())
+    } else if brk == Break::EnvContainedCaseVariant {
+        // same real path, differing only in case from `blk` -- APFS is
+        // case-insensitive by default, so this is a real-world shape, not a
+        // synthetic one.
+        blk.join("python")
+            .join("cpython-3.12.4")
+            .display()
+            .to_string()
+            .to_uppercase()
     } else {
         blk.join("python")
             .join("cpython-3.12.4")
@@ -174,11 +215,22 @@ exit 1
             settings: true,
         }
     };
+    // `Break::PreexistingVscode`'s tree shape is meant to be genuinely
+    // distinct from the offline-seeded default, not just a copy of it under
+    // a different name: a VS-Code-registered (not offline-seeded) profile
+    // gets a hashed directory id, never the seed constant "blockless" --
+    // checks 4/4b/6 (settings.json location, python path, auto-open-panel)
+    // all consume this journaled id, not a hardcoded one.
+    let profile_location = if brk == Break::PreexistingVscode {
+        "a1b2c3d4e5"
+    } else {
+        "blockless"
+    };
     let state = State {
         product_version: "1.99.0".to_string(),
-        vscode_installed_by_us: true,
+        vscode_installed_by_us: brk != Break::PreexistingVscode,
         profile_created_by_us: true,
-        profile_location: "blockless".to_string(),
+        profile_location: profile_location.to_string(),
         steps,
         mpremote_version: MPREMOTE_VERSION.to_string(),
         env_python: env_python.to_string_lossy().into_owned(),
@@ -198,7 +250,7 @@ exit 1
     let auto_open_panel = brk != Break::AutoOpenPanel;
     let settings_target = code_user
         .join("profiles")
-        .join("blockless")
+        .join(profile_location)
         .join("settings.json");
     std::fs::create_dir_all(settings_target.parent().unwrap()).unwrap();
     std::fs::write(
@@ -423,11 +475,27 @@ fn parity_state_steps_broken() {
     assert_parity("state-steps-broken", Break::StateSteps);
 }
 
-/// A realistic full M0-installed tree (same shape `build_fixture(_, None)`
-/// produces): distinct from `parity_all_green` mainly in intent -- this is
-/// the "does a genuinely finished install verify green on both sides" case
-/// scope.md calls out by name, not just an absence-of-breakage smoke test.
+/// A realistic full M0-installed tree where VS Code pre-existed (this
+/// install did not put it there) -- genuinely distinct from
+/// `parity_all_green`'s shape (`vscodeInstalledByUs: false` and a
+/// VS-Code-generated hashed `profileLocation` rather than the seed
+/// constant), not a copy of it under a different name. Still fully green on
+/// both sides: `vscodeInstalledByUs` is journal-only bookkeeping none of the
+/// 7 checks read, and checks 4/4b/6 correctly resolve the hashed location.
 #[test]
-fn parity_m0_installed_tree_shape() {
-    assert_parity("m0-installed-tree", Break::None);
+fn parity_m0_installed_tree_with_preexisting_vscode_shape() {
+    assert_parity(
+        "m0-installed-tree-preexisting-vscode",
+        Break::PreexistingVscode,
+    );
+}
+
+#[test]
+fn parity_extensions_case_insensitive() {
+    assert_parity("extensions-case-variant", Break::ExtensionsCaseVariant);
+}
+
+#[test]
+fn parity_env_contained_case_folded() {
+    assert_parity("env-contained-case-variant", Break::EnvContainedCaseVariant);
 }
