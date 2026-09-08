@@ -270,6 +270,14 @@ mod tests {
                             Err(_) => return,
                         }
                     };
+                    // Windows hands back an accepted socket that INHERITED the
+                    // listener's non-blocking mode; Unix does not. The listener is
+                    // non-blocking only so accept() can poll a deadline, and
+                    // everything below assumes blocking: the read loop turns
+                    // WouldBlock into n == 0 and stops without reading the request,
+                    // and write_all can WouldBlock into a discarded error, so the
+                    // client sees a connection that closed without a response.
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(5)))
                         .unwrap();
