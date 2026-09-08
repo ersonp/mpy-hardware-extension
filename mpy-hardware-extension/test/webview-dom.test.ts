@@ -749,6 +749,55 @@ test("a restore's bundled generation boundary un-drains the quota bar for a run 
   assert.equal(document.getElementById("quota")!.classList.contains("hidden"), false, "the quota bar itself is shown");
 });
 
+// A REFUSED Generate is defect 2's own reachable trigger: a view-only replay leaves viewOnlyReplay
+// set, so the click's clearConversation() (HomeWorkbench.js) really does wipe the feed and arm the
+// real drain, and only THEN does the host get to refuse the resulting start_session. Everything here
+// is a production message shape — the replay bundle a real restore posts, the real Generate click
+// (not a hand call to markSessionEventsStale), and the two messages the FIXED start_session handler
+// now posts in order (session_reset re-affirmed before the busy guard, exactly like panel.ts).
+// Mutation: revert the handler-top post (or make sessionEventIsStale ignore the drain close) and the
+// quota bar stays frozen at 0 / hidden, and the credit line never flushes.
+test("a refused Generate after a view-only replay still closes the drain the wipe armed", async () => {
+  const posted: any[] = [];
+  const dom = await loadWebview(posted);
+  const { document } = dom.window;
+
+  post(dom, {
+    type: "restore_replay",
+    messages: [
+      { type: "restore_reset", viewOnly: true },
+      { type: "session_reset", generation: 1 },
+      { type: "restore_user", text: "an old replayed session" },
+      { type: "restore_done", terminal: "complete" },
+    ],
+  });
+  assert.match(document.getElementById("activity")!.textContent!, /an old replayed session/, "the replay rendered");
+
+  (document.getElementById("intent") as HTMLTextAreaElement).value = "read a DHT22 sensor";
+  (document.getElementById("generate") as HTMLButtonElement).click();
+  assert.doesNotMatch(document.getElementById("activity")!.textContent!, /an old replayed session/, "the real wipe fired (viewOnlyReplay was set)");
+  assert.ok(posted.some((m) => m.type === "start_session"), "the click still asks the host to start");
+
+  // The host refuses (busy, save in flight, protocol/auth — any of the nine exits): the boundary
+  // re-affirmation lands first, then the refusal, same generation as the bundle's since no real
+  // start ever reached the controller.
+  post(dom, { type: "session_reset", generation: 1 });
+  post(dom, { type: "session_busy" });
+
+  // A stamped credits frame that reaches the relay after the refusal must still move the quota
+  // bar — proving the refusal's own boundary post closed the drain, instead of stranding it until
+  // the next SUCCESSFUL build.
+  post(dom, { type: "phase_start", phase: "upy-generate-plugin" });
+  post(dom, { type: "session_event", generation: 1, event: { kind: "credits", balance: 41, dailyGrant: 50, usage: { operation: "generate", phase: "upy-generate-plugin", credits_consumed: 9, remaining_quota: 41 } } });
+  assert.equal(document.getElementById("qUsed")!.textContent, "41", "the quota bar updates from the post-refusal frame — not dropped as a straggler");
+  assert.equal(document.getElementById("quota")!.classList.contains("hidden"), false, "the quota bar itself is shown");
+
+  // And a later phase boundary still flushes the rolled-up credit line off the same events.
+  post(dom, { type: "phase_complete", payload: { phase: "upy-generate-plugin", result: "ok" } });
+  const feed = document.getElementById("activity")!.textContent!;
+  assert.ok(feed.includes("Generate: 9 credits over 1 turn, 41 left"), `the per-phase credit line must flush: ${feed}`);
+});
+
 // One malformed nested message must not truncate the rest of the burst. No producer emits a
 // codeless code_updated inside a real restore_replay today (panel.ts only pushes one when
 // `typeof code === "string"`), but the bundle's contents are still host-authored data, not a
