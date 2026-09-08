@@ -191,8 +191,19 @@ four**. Write two of four, not "the pins are proven".
 
 ### To build and test the Rust (rungs 1 to 3)
 
-- **rustup.** Nothing else: `rust-toolchain.toml` pins 1.98.1 with clippy and rustfmt, and rustup
-  installs that toolchain on the first `cargo` run inside `blockless-installer/`.
+- **rustup.** `rust-toolchain.toml` pins 1.98.1 with clippy and rustfmt, and rustup installs that
+  toolchain on the first `cargo` run inside `blockless-installer/`.
+- **A linker, Windows only.** rustup's default host is `x86_64-pc-windows-msvc`, which links with
+  `link.exe` from **VS Build Tools with the VCTools workload**. Without it `cargo test` dies with
+  "linker `link.exe` not found" before a single test runs, so rustup alone is not enough on
+  Windows. Install with:
+
+      winget install --id Microsoft.VisualStudio.2022.BuildTools -e --override "--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+
+  **CI never sees this**, because `windows-latest` ships Build Tools preinstalled. It is a
+  local-machine gap only, which is why it went unnoticed until the first Windows session.
+  `x86_64-pc-windows-gnu` will build without Build Tools if mingw is present, but it is not the
+  target the product ships on; say so in any result reported from it.
 - **A shell the parity suite can drive**, per platform:
   - macOS and Linux need **zsh**, for `verify-blockless.zsh` and for the fixture's stub
     executables, whose shebang is `#!/usr/bin/env zsh`. `ubuntu-latest` has none by default.
