@@ -97,9 +97,26 @@ mod mac {
             // `stop_and_wait` (profile.rs) that polls `is_alive` on the one
             // PID it cares about afterward, regardless of which mechanism
             // asked the app to quit.
-            let _ = Command::new("osascript")
-                .args(["-e", r#"tell application "Visual Studio Code" to quit"#])
-                .status();
+            // Requires TCC Automation consent for the calling process on a
+            // real Mac; denied or unprompted (the normal unattended case),
+            // osascript fails and quits nothing. Warn rather than swallow,
+            // since a silent failure here can fall through to
+            // `stop_and_wait`'s force-kill -- strictly worse for
+            // window/profile-state saving than the SIGTERM this replaced.
+            // Non-zero isn't always that, though: `register_profile` can
+            // call this once per newly-appeared PID, and an app-wide quit
+            // means the SECOND call always finds nothing left to quit --
+            // harmless (`stop_and_wait`'s own `is_alive` check is what
+            // decides whether force-kill actually runs), just noisy.
+            if !run_ok(
+                Command::new("osascript")
+                    .args(["-e", r#"tell application "Visual Studio Code" to quit"#]),
+            ) {
+                tracing::warn!(
+                    "osascript quit returned non-zero (the app may already have quit); \
+                     force-kill runs only if the PID is still alive"
+                );
+            }
         }
         fn force_kill(&self, pid: u32) {
             let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();

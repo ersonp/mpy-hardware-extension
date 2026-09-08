@@ -117,6 +117,19 @@ fn stamp_and_write(state: &mut State, path: &Path) -> Result<(), OpsError> {
     Ok(())
 }
 
+/// `VscodeStepOutcome::product_version_mismatch`'s own doc says "logged by
+/// the caller, never a failure" -- this is that logging, shared by
+/// `install` and `repair` (the two callers of step 1).
+fn log_version_mismatch(op: &str, outcome: &vscode::VscodeStepOutcome) {
+    if let Some(api) = &outcome.product_version_mismatch {
+        info!(
+            installed = %outcome.product_version,
+            api_reported = %api,
+            "{op}: step 1 installed version differs from the update API"
+        );
+    }
+}
+
 /// Checked before any step runs in ops that touch extensions
 /// (`install`/`repair`/`update_extension`): our extension only ever installs
 /// from this bundled VSIX (never the Marketplace, see `extensions.rs`), so a
@@ -160,7 +173,11 @@ pub fn repair(env: &dyn Environment, ctx: &OpsContext) -> Result<State, OpsError
     current.vscode_installed_by_us = seed.vscode_installed_by_us || vscode_outcome.installed_by_us;
     current.steps.vscode = true;
     stamp_and_write(&mut current, &ctx.paths.state)?;
-    info!("repair: step 1 (vscode) done");
+    log_version_mismatch("repair", &vscode_outcome);
+    info!(
+        skipped = !vscode_outcome.installed_by_us,
+        "repair: step 1 (vscode) done"
+    );
 
     let ext_outcome = extensions::ensure_extensions(
         env,
@@ -206,7 +223,10 @@ pub fn repair(env: &dyn Environment, ctx: &OpsContext) -> Result<State, OpsError
     current.settings_mechanism = "A".to_string();
     current.steps.settings = true;
     stamp_and_write(&mut current, &ctx.paths.state)?;
-    info!("repair: step 4 (settings) done, repair finished");
+    info!(
+        applied = settings_outcome.applied,
+        "repair: step 4 (settings) done, repair finished"
+    );
 
     Ok(current)
 }
@@ -248,7 +268,11 @@ pub fn install(env: &dyn Environment, ctx: &OpsContext) -> Result<State, OpsErro
     current.vscode_installed_by_us = seed.vscode_installed_by_us || vscode_outcome.installed_by_us;
     current.steps.vscode = true;
     stamp_and_write(&mut current, &ctx.paths.state)?;
-    info!("install: step 1 (vscode) done");
+    log_version_mismatch("install", &vscode_outcome);
+    info!(
+        skipped = !vscode_outcome.installed_by_us,
+        "install: step 1 (vscode) done"
+    );
 
     let ext_outcome = extensions::ensure_extensions(
         env,
@@ -312,21 +336,21 @@ pub fn install(env: &dyn Environment, ctx: &OpsContext) -> Result<State, OpsErro
     current.settings_mechanism = "A".to_string();
     current.steps.settings = true;
     stamp_and_write(&mut current, &ctx.paths.state)?;
-    info!("install: step 4 (settings) done");
+    info!(
+        applied = settings_outcome.applied,
+        "install: step 4 (settings) done"
+    );
 
     // Final: foreground open into the profile. Every earlier step that
     // spawned a child of its own (register_profile's window fallback) has
     // already closed it before returning, so this is always a fresh
     // extension host -- never an attach to a lingering child, never the
     // user's own session.
-    if env
-        .spawn(
-            &vscode_outcome.code_cli,
-            &["--profile", &ctx.manifest.profile_name, "--new-window"],
-        )
-        .is_err()
-    {
-        warn!("install: final foreground open failed to spawn");
+    if let Err(e) = env.spawn(
+        &vscode_outcome.code_cli,
+        &["--profile", &ctx.manifest.profile_name, "--new-window"],
+    ) {
+        warn!(error = %e, "install: final foreground open failed to spawn");
     }
     info!("install: finished");
 
@@ -423,6 +447,7 @@ pub fn update_extension(env: &dyn Environment, ctx: &OpsContext) -> Result<State
 /// mutates the machine, and no data leaves it unless the caller exports the
 /// zip themselves (ARCHITECTURE §9).
 pub fn diagnostics(ctx: &OpsContext, target_zip: &Path) -> Result<(), OpsError> {
+    info!(target = %target_zip.display(), "diagnostics: starting");
     let file = std::fs::File::create(target_zip).map_err(|e| {
         OpsError::Diagnostics(format!("could not create {}: {e}", target_zip.display()))
     })?;
@@ -472,6 +497,7 @@ pub fn diagnostics(ctx: &OpsContext, target_zip: &Path) -> Result<(), OpsError> 
     std::io::Write::write_all(&mut writer, &facts_bytes).map_err(io_err)?;
 
     writer.finish().map_err(zip_err)?;
+    info!("diagnostics: finished");
     Ok(())
 }
 
@@ -837,31 +863,47 @@ mod tests {
         }
     }
 
+    /// The one `tracing` subscriber every log-capturing test in this module
+    /// shares, installed at most once process-wide.
+    ///
+    /// `cargo test`'s default parallel runner has many OTHER tests calling
+    /// `install`/`repair` concurrently on other threads, sharing these same
+    /// `info!`/`warn!` callsites. A THREAD-LOCAL subscriber
+    /// (`tracing::subscriber::with_default`) loses this race: a callsite's
+    /// process-wide interest is cached on first-ever use, and a concurrent
+    /// thread still running under the no-op default can win that race and
+    /// cache it "not interested" out from under a test -- empirically,
+    /// roughly 1 run in 3 under the full suite. A single global default
+    /// instead makes every callsite's interest resolve once, globally, with
+    /// no thread-local toggling and thus no window for the race.
+    ///
+    /// Only the FIRST caller's `try_init` actually succeeds (global default
+    /// can only be set once per process); every caller gets back a clone of
+    /// the SAME shared writer regardless of which one won, via `OnceLock`,
+    /// so which log-capturing test happens to run first doesn't matter --
+    /// they all observe the one real subscriber. Other, non-capturing
+    /// parallel tests free-ride on it harmlessly (their lines just add
+    /// noise a `contains` check ignores).
+    fn capturing_log_writer() -> CapturingWriter {
+        static WRITER: std::sync::OnceLock<CapturingWriter> = std::sync::OnceLock::new();
+        WRITER
+            .get_or_init(|| {
+                let writer = CapturingWriter::default();
+                let _ = tracing_subscriber::fmt()
+                    .with_writer(writer.clone())
+                    .with_ansi(false)
+                    .try_init();
+                writer
+            })
+            .clone()
+    }
+
     #[test]
     fn install_logs_every_step() {
         // Proves ops.rs actually emits a log line per step (the reviewer's
         // finding: nothing logged, so diagnostics bundled an empty logs/),
         // not just that the tracing macro calls compile.
-        //
-        // `cargo test`'s default parallel runner has many OTHER tests
-        // calling `install`/`repair` concurrently on other threads, sharing
-        // these same `info!`/`warn!` callsites. A THREAD-LOCAL subscriber
-        // (`tracing::subscriber::with_default`) loses this race: a
-        // callsite's process-wide interest is cached on first-ever use, and
-        // a concurrent thread still running under the no-op default can win
-        // that race and cache it "not interested" out from under this
-        // test -- empirically, roughly 1 run in 3 under the full suite.
-        // Setting ONE global default instead (this is the only test in the
-        // crate that installs one, so `try_init` succeeds; any OTHER
-        // parallel test that logs after this point free-rides on the same
-        // subscriber, harmlessly, since assertions below only check
-        // presence) makes every callsite's interest resolve once, globally,
-        // with no thread-local toggling and thus no window for the race.
-        let writer = CapturingWriter::default();
-        let _ = tracing_subscriber::fmt()
-            .with_writer(writer.clone())
-            .with_ansi(false)
-            .try_init();
+        let writer = capturing_log_writer();
 
         let dir = temp_dir("install-logs");
         let manifest = test_manifest_matching(b"vsix contents");
@@ -874,10 +916,10 @@ mod tests {
         let logged = String::from_utf8(writer.0.lock().unwrap()[before..].to_vec()).unwrap();
         for expected in [
             "install: starting",
-            "install: step 1 (vscode) done",
+            "install: step 1 (vscode) done skipped=true",
             "install: step 2 (extension) done",
             "install: step 3 (runtime) done",
-            "install: step 4 (settings) done",
+            "install: step 4 (settings) done applied=true",
             "install: finished",
         ] {
             assert!(
@@ -1010,7 +1052,15 @@ mod tests {
         *env.mpremote_version.borrow_mut() = None;
         *env.run_uv_fails.borrow_mut() = true;
 
+        let writer = capturing_log_writer();
+        let before = writer.0.lock().unwrap().len();
         let result = install(&env, &ctx);
+        let logged = String::from_utf8(writer.0.lock().unwrap()[before..].to_vec()).unwrap();
+        assert!(
+            logged.contains("install: step 3 (runtime) failed"),
+            "the failure warn! line, with its error field, must reach the \
+             logs a real run's diagnostics bundle would export; got:\n{logged}"
+        );
 
         assert!(result.is_err(), "test setup: step 3 must actually fail");
         let persisted = State::read(&ctx.paths.state).unwrap().unwrap();

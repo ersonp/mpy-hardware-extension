@@ -52,19 +52,64 @@ mod real_main {
     }
 
     /// A single ever-appended `logs/installer.log` (ARCHITECTURE §9), so a
-    /// repeat run's steps land alongside the first, matching §13's "a
-    /// second run logs every step as a skip". The returned guard must stay
-    /// alive for the process's lifetime -- dropping it early stops the
-    /// background writer thread and silently loses buffered log lines.
-    fn init_logging(logs_dir: &std::path::Path) -> tracing_appender::non_blocking::WorkerGuard {
-        let _ = std::fs::create_dir_all(logs_dir);
-        let file_appender = tracing_appender::rolling::never(logs_dir, "installer.log");
-        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
-        tracing_subscriber::fmt()
-            .with_writer(non_blocking)
+    /// repeat run's steps land alongside the first rather than overwriting
+    /// them -- ops.rs's own `install`/`repair` step 1 and step 4 lines carry
+    /// a `skipped`/`applied` field, so a support engineer reading the file
+    /// can tell a skip from a re-do on those two steps (§13); steps 2/3
+    /// expose no skip signal from their own step modules, so they log a
+    /// bare "done" either way. Synchronous (a `Mutex<File>` writer, no
+    /// background-thread appender crate): every
+    /// line is on disk
+    /// before the `info!`/`warn!` call returns, so a line can never be lost
+    /// to `std::process::exit` -- every failure path in this binary
+    /// (`die`, the verify-failure exit) calls it directly, with no `Drop`
+    /// to flush a buffered writer first.
+    ///
+    /// Best-effort: an unwritable/full `BLK` must never abort an install
+    /// over a support-only feature, so a failure to create the directory or
+    /// open the file just skips file logging (a one-line stderr note),
+    /// never panics.
+    fn init_logging(logs_dir: &std::path::Path) {
+        if let Err(e) = std::fs::create_dir_all(logs_dir) {
+            eprintln!(
+                "blockless-installer: could not create {}: {e} (continuing without file logging)",
+                logs_dir.display()
+            );
+            return;
+        }
+        let path = logs_dir.join("installer.log");
+        let file = match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!(
+                    "blockless-installer: could not open {}: {e} (continuing without file logging)",
+                    path.display()
+                );
+                return;
+            }
+        };
+        let _ = tracing_subscriber::fmt()
+            .with_writer(std::sync::Mutex::new(file))
             .with_ansi(false)
-            .init();
-        guard
+            .try_init();
+    }
+
+    /// `uninstall`'s variant: never hold a log file handle inside `BLK`
+    /// while this run might `remove_dir_all` it (a real risk on Windows).
+    /// Three of `uninstall`'s four outcomes (`VscodeRunning`,
+    /// `AbortedUnreadableState`, a tripped invariant guard) never delete
+    /// `BLK` at all -- exactly the cases worth a diagnosis -- so this
+    /// stays useful to the operator on the console instead of dropping the
+    /// op's `info!`/`warn!` lines entirely.
+    fn init_stderr_logging() {
+        let _ = tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .with_ansi(false)
+            .try_init();
     }
 
     fn mac_install_targets(os: Os, raw: &RawEnv) -> Vec<PathBuf> {
@@ -127,7 +172,15 @@ mod real_main {
         let os = Os::detect(&raw).unwrap_or_else(|e| die(e));
         let arch = Arch::detect(os, &raw).unwrap_or_else(|e| die(e));
         let paths = Paths::resolve(os, &raw).unwrap_or_else(|e| die(e));
-        let _log_guard = init_logging(&paths.logs);
+        // Uninstall may delete BLK (which owns logs/) this run -- never hold
+        // an open log file handle inside a tree we're about to remove (a
+        // real risk on Windows, where a still-open file can block or
+        // partially defeat the delete).
+        if matches!(cli.command, Command::Uninstall { .. }) {
+            init_stderr_logging();
+        } else {
+            init_logging(&paths.logs);
+        }
         let code_candidates = blockless_installer_core::platform::code_cli_candidates(os, &raw)
             .unwrap_or_else(|e| die(e));
         let targets = mac_install_targets(os, &raw);
