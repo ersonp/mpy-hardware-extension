@@ -12,9 +12,14 @@ it matters more than for anything else in this repo.
 Two rules before anything else.
 
 **The M0 scripts under `blockless-installer/scripts/` are the executable spec.** Where the Rust
-and a script disagree, the script is what shipped on a real VM and the Rust is wrong. The parity
-suites shell out to those scripts at test time, so they are the oracle, not legacy. Never delete
-them.
+and a script disagree, the script is usually what shipped on a real VM and the Rust is wrong. The
+parity suites shell out to those scripts at test time, so they are the oracle, not legacy. Never
+delete them.
+
+**"Usually" is doing real work in that sentence.** The first counter-example is on record: on
+Windows, `verify-blockless.ps1` could report ALL PASS and exit 0 while silently dropping a check,
+and the Rust was correct. So a divergence means "one of these two is wrong", not "the Rust is
+wrong". Read both before deciding, and say which side you concluded is the outlier and why.
 
 **`npm run baseline` is the wrong gate for this component.** It is the extension gate, the
 installer touches no extension source, and it can only fail here for environment reasons. The
@@ -68,6 +73,23 @@ because both tests read the machine they ran on rather than their fixture:
 When a parity test fails, report the full `left`/`right` bit vectors: `left` is the script,
 `right` is the Rust. Check order is code CLI runnable, extensions in profile, pinned mpremote,
 env containment, `mpyhw.pythonPath`, `mpyhw.autoOpenPanel`, state steps.
+
+**Count the bits before comparing them.** Seven checks means seven PASS/FAIL lines. Six means a
+check did not fail, it *vanished*, and that is a different and worse bug than a divergence. On
+Windows, `&` against a path that exists but is not a runnable PE raises
+`ApplicationFailedException`, which is statement-terminating: PowerShell abandons the whole
+if/else, neither `pass` nor `fail` runs, the fail counter never moves, and the script reports ALL
+PASS and exits 0 with an assertion missing. Every external invocation in the ps1 goes through
+`invoke_tool` for that reason. A present-but-unrunnable `env\Scripts\python.exe` is exactly what a
+half-finished install looks like, so the check most likely to matter is the one that disappeared.
+
+The general shape, and this is the third instance on this project after a mocked deploy grading
+PASS and a classifier reading our own Ctrl-C as a firmware crash: **a gate that cannot see its own
+blindness reports success.** When a check cannot be performed, it has to fail, never disappear.
+
+Beware of fixes that hide this. Giving the fixture a runnable stub makes the parity tests pass and
+puts the vanishing-check hole straight back out of sight, so the fail-closed behaviour needs its
+own test that deliberately uses an unrunnable file.
 
 ## Rung 2: CI
 

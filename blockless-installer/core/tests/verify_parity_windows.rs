@@ -106,10 +106,17 @@ fn build_fixture(name: &str, brk: Break) -> Fixture {
     } else {
         MPREMOTE_VERSION
     };
-    // python.exe is invoked as `& $ENVPY -m mpremote version`; a .cmd can't
-    // be named python.exe, so this is a tiny batch file placed at that exact
-    // path -- Windows resolves it as an executable by content, not extension
-    // rules, when invoked via cmd.exe/PowerShell's call operator.
+    // python.exe is invoked as `& $ENVPY -m mpremote version`, and a .cmd cannot
+    // be named python.exe, so this is a batch file placed at that exact path.
+    //
+    // KNOWN BROKEN, and measured on a real Windows host: this does NOT work.
+    // Windows requires a real PE binary, so both `&` and Command::new fail on
+    // this file, and all nine parity cases fail because of it. The claim that
+    // once stood here -- that Windows resolves an executable by content rather
+    // than by extension -- is false. The fix is a real .exe stub; until then,
+    // note that a stub which merely LOOKS runnable is what let the script's
+    // vanishing-check defect hide, so do not "fix" this by making the failure
+    // quieter.
     let python_script = format!(
         "@echo off\r\nif \"%~1\"==\"-m\" if \"%~2\"==\"mpremote\" if \"%~3\"==\"version\" (\r\n  echo mpremote {mpremote_reported}\r\n  exit /b 0\r\n)\r\nexit /b 1\r\n"
     );
@@ -401,4 +408,49 @@ fn parity_state_steps_broken() {
 #[test]
 fn parity_m0_installed_tree_shape() {
     assert_parity("m0-installed-tree", Break::None);
+}
+
+/// An `env\Scripts\python.exe` that EXISTS but is not a runnable PE must fail
+/// its check, not delete it.
+///
+/// `&` on such a file raises ApplicationFailedException, which is
+/// statement-terminating: PowerShell abandoned the entire if/else, so neither
+/// `pass` nor `fail` ran, `$script:fails` stayed 0, and the script reported ALL
+/// PASS and exited 0 with one assertion silently missing. That is a verifier
+/// blessing an install it never checked, and a present-but-unrunnable python is
+/// exactly what a half-finished or corrupted install leaves behind.
+///
+/// Deliberately writes a non-PE file rather than relying on what the fixture
+/// happens to produce, so this keeps testing the same thing once the fixture's
+/// stub becomes a real executable.
+///
+/// Kills the fix: drop `invoke_tool`'s try/catch and this reports 6 lines and
+/// exit 0 instead of 7 and non-zero.
+#[test]
+fn script_fails_closed_when_envpy_exists_but_cannot_run() {
+    let fixture = build_fixture("envpy-not-runnable", Break::None);
+    let envpy = fixture.blk.join("env").join("Scripts").join("python.exe");
+    assert!(
+        envpy.exists(),
+        "fixture should have placed an ENVPY to break"
+    );
+    std::fs::write(&envpy, b"not a PE binary").unwrap();
+
+    let (bits, exit) = run_real_script(&fixture);
+
+    assert_eq!(
+        bits.len(),
+        7,
+        "a check vanished instead of failing: the script emitted {} PASS/FAIL \
+         lines, so one if/else was abandoned mid-statement. bits={bits:?}",
+        bits.len()
+    );
+    assert!(
+        !bits[2],
+        "check 3 (pinned mpremote) must FAIL when ENVPY cannot run, got {bits:?}"
+    );
+    assert_ne!(
+        exit, 0,
+        "the script reported success while a check could not be performed"
+    );
 }
