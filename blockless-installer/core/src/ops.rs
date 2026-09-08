@@ -818,10 +818,7 @@ mod tests {
     }
 
     /// A `tracing` writer that captures formatted output into a shared
-    /// buffer, so a test can assert on log content without a global
-    /// subscriber (which `tracing_subscriber::fmt().init()` would panic on
-    /// if a test process ever set two) -- `tracing::subscriber::with_default`
-    /// scopes this to the current thread for the duration of the closure.
+    /// buffer, so a test can assert on log content.
     #[derive(Clone, Default)]
     struct CapturingWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
     impl std::io::Write for CapturingWriter {
@@ -845,22 +842,36 @@ mod tests {
         // Proves ops.rs actually emits a log line per step (the reviewer's
         // finding: nothing logged, so diagnostics bundled an empty logs/),
         // not just that the tracing macro calls compile.
+        //
+        // `cargo test`'s default parallel runner has many OTHER tests
+        // calling `install`/`repair` concurrently on other threads, sharing
+        // these same `info!`/`warn!` callsites. A THREAD-LOCAL subscriber
+        // (`tracing::subscriber::with_default`) loses this race: a
+        // callsite's process-wide interest is cached on first-ever use, and
+        // a concurrent thread still running under the no-op default can win
+        // that race and cache it "not interested" out from under this
+        // test -- empirically, roughly 1 run in 3 under the full suite.
+        // Setting ONE global default instead (this is the only test in the
+        // crate that installs one, so `try_init` succeeds; any OTHER
+        // parallel test that logs after this point free-rides on the same
+        // subscriber, harmlessly, since assertions below only check
+        // presence) makes every callsite's interest resolve once, globally,
+        // with no thread-local toggling and thus no window for the race.
+        let writer = CapturingWriter::default();
+        let _ = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .with_ansi(false)
+            .try_init();
+
         let dir = temp_dir("install-logs");
         let manifest = test_manifest_matching(b"vsix contents");
         let vsix = write_vsix(&dir, b"vsix contents");
         let ctx = make_ctx(&dir, &manifest, &vsix);
         let env = FakeEnvironment::new(&ctx.code_candidates[0], &vsix);
 
-        let writer = CapturingWriter::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(writer.clone())
-            .with_ansi(false)
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            install(&env, &ctx).unwrap();
-        });
-
-        let logged = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
+        let before = writer.0.lock().unwrap().len();
+        install(&env, &ctx).unwrap();
+        let logged = String::from_utf8(writer.0.lock().unwrap()[before..].to_vec()).unwrap();
         for expected in [
             "install: starting",
             "install: step 1 (vscode) done",
