@@ -114,23 +114,13 @@ function namesBuild(line: string, name: string): boolean {
 }
 
 /**
- * Every capture line after the soft reboot, with mpremote's own chatter dropped.
- *
- * Reads BOTH captures, not just the serial one. The final reset is by contract the LAST device
- * operation, so a deploy that runs one capture puts its only proof in final_reset_excerpt and
- * leaves serial_excerpt empty -- and two runs were reported "firmware ran: NOT OBSERVED" while
- * their final reset held "MPY: soft reboot" and the boot line.
+ * One capture's lines after its OWN reboot/interrupt boundary.
  */
-export function postRebootLines(report: any): string[] {
-  const captured = [report?.serial_excerpt, report?.final_reset_excerpt,
-                    report?.final_reset?.output_excerpt, report?.final_reset?.output]
-    .map((v: unknown) => (typeof v === "string" ? v : ""))
-    .filter(Boolean)
-    .join("\n");
+function postRebootCaptureLines(capture: string): string[] {
   // A bare \r ends a line too. Stripping it instead would splice two rendered lines into one and
   // push a "Traceback (most recent call last):" off the start of its line, re-creating against the
   // traceback anchor exactly the blind spot renderTerminalLine exists to close.
-  const lines = captured.split(/\r\n|[\r\n]/).map(renderTerminalLine).filter(Boolean);
+  const lines = capture.split(/\r\n|[\r\n]/).map(renderTerminalLine).filter(Boolean);
   // No reboot line means no slice point, so the whole capture is treated as firmware output.
   const rebootAt = lines.findIndex((l: string) => l.includes("soft reboot"));
   // Not every board prints "MPY: soft reboot" -- capture_repl.py's own observed_fresh_boot()
@@ -139,8 +129,30 @@ export function postRebootLines(report: any): string[] {
   // interrupt's own exception line is the fallback slice point. Whichever marker sits LATER is
   // where firmware output really starts, so a genuine crash after the reboot is still kept.
   const interruptAt = lines.findIndex((l: string) => INTERRUPT_EXCEPTION.test(l));
-  return lines
-    .slice(Math.max(rebootAt, interruptAt) + 1)
+  return lines.slice(Math.max(rebootAt, interruptAt) + 1);
+}
+
+/**
+ * Every capture line after the soft reboot, with mpremote's own chatter dropped.
+ *
+ * Reads BOTH captures, not just the serial one. The final reset is by contract the LAST device
+ * operation, so a deploy that runs one capture puts its only proof in final_reset_excerpt and
+ * leaves serial_excerpt empty -- and two runs were reported "firmware ran: NOT OBSERVED" while
+ * their final reset held "MPY: soft reboot" and the boot line.
+ *
+ * Sliced PER CAPTURE, not on the joined text: each capture's reboot/interrupt marker only bounds
+ * ITS OWN capture. Joining first and finding one boundary for both loses the capture boundary --
+ * a marker in the first capture forgave nothing in the second's own traceback (false `crashed`),
+ * and a marker in the second capture swallowed real output that came before it in the first
+ * (false `absent`).
+ */
+export function postRebootLines(report: any): string[] {
+  const captures = [report?.serial_excerpt, report?.final_reset_excerpt,
+                    report?.final_reset?.output_excerpt, report?.final_reset?.output]
+    .map((v: unknown) => (typeof v === "string" ? v : ""))
+    .filter(Boolean);
+  return captures
+    .flatMap(postRebootCaptureLines)
     .filter((l: string) => !MPREMOTE_BANNER.test(l) && !SCAFFOLD_BOOT_MARKER.test(l));
 }
 
