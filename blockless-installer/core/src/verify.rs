@@ -642,10 +642,15 @@ mod tests {
         let dir = temp_dir("run-checks-green");
         let blk = dir.join("Blockless");
         let code_user = dir.join("Code").join("User");
-        let code_cli = dir.join("code");
+        // Under a `bin/` dir, not beside `Code/`, and the nesting is load-bearing rather than
+        // cosmetic: macOS and Windows are case-insensitive, so a file at `dir/code` IS the path
+        // `dir/Code`, and creating the profile tree under `code_user` then fails ENOTDIR. This
+        // passes on a case-sensitive filesystem, so Linux CI cannot see it. The real CLI lives at
+        // .../Resources/app/bin/code anyway, which is why the script-parity fixture never hit this.
+        let code_cli = dir.join("bin").join("code");
         let envpy = blk.join("env").join("bin").join("python");
+        std::fs::create_dir_all(code_cli.parent().unwrap()).unwrap();
         std::fs::write(&code_cli, b"").unwrap();
-        std::fs::write(&envpy, b"").ok(); // parent may not exist; ignore, exists() check below covers real use
         std::fs::create_dir_all(envpy.parent().unwrap()).unwrap();
         std::fs::write(&envpy, b"").unwrap();
 
