@@ -106,21 +106,24 @@ fn build_fixture(name: &str, brk: Break) -> Fixture {
     } else {
         MPREMOTE_VERSION
     };
-    // python.exe is invoked as `& $ENVPY -m mpremote version`, and a .cmd cannot
-    // be named python.exe, so this is a batch file placed at that exact path.
+    // A REAL executable, copied rather than written. Windows will not run a
+    // script placed at a `.exe` path: this fixture used to write a batch file
+    // here, on the belief that Windows resolves an executable by content rather
+    // than by extension, and it does not. Both `& $ENVPY` in the ps1 and
+    // Command::new on the Rust side failed on it, which failed all nine parity
+    // cases and hid a defect in verify-blockless.ps1 that let it report ALL PASS
+    // with a check missing.
     //
-    // KNOWN BROKEN, and measured on a real Windows host: this does NOT work.
-    // Windows requires a real PE binary, so both `&` and Command::new fail on
-    // this file, and all nine parity cases fail because of it. The claim that
-    // once stood here -- that Windows resolves an executable by content rather
-    // than by extension -- is false. The fix is a real .exe stub; until then,
-    // note that a stub which merely LOOKS runnable is what let the script's
-    // vanishing-check defect hide, so do not "fix" this by making the failure
-    // quieter.
-    let python_script = format!(
-        "@echo off\r\nif \"%~1\"==\"-m\" if \"%~2\"==\"mpremote\" if \"%~3\"==\"version\" (\r\n  echo mpremote {mpremote_reported}\r\n  exit /b 0\r\n)\r\nexit /b 1\r\n"
-    );
-    write_batch_stub(&env_python, &python_script);
+    // The reported version travels in a file beside the exe rather than in the
+    // environment, so the Mpremote break differs from its neighbours without any
+    // state shared between tests running in parallel.
+    std::fs::create_dir_all(env_python.parent().unwrap()).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_fixture-fake-python"), &env_python).unwrap();
+    std::fs::write(
+        env_python.with_file_name("mpremote-version.txt"),
+        mpremote_reported,
+    )
+    .unwrap();
 
     let pyvenv_home = if brk == Break::EnvContained {
         format!(r"{}-foreign\python\cpython-3.12.4", blk.display())
