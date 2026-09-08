@@ -40,9 +40,9 @@ pub enum ProfileError {
 
 /// Process operations `profile.rs` needs, injected so every code path here is
 /// unit-testable without a real VS Code binary. A production implementation
-/// is OS-specific (mac: SIGTERM + `pgrep`; Windows: `taskkill` + `Get-Process`)
-/// and lands with `vscode.rs`/`ops.rs`, which are the first callers that run
-/// for real.
+/// is OS-specific (mac: `osascript ... quit` + `pgrep`; Windows: `taskkill` +
+/// `Get-Process`) and lands with `vscode.rs`/`ops.rs`, which are the first
+/// callers that run for real.
 pub trait CommandRunner {
     /// PIDs of any currently-running VS Code app processes on this machine.
     /// Re-checked immediately before every spawn (never cached from an
@@ -53,9 +53,12 @@ pub trait CommandRunner {
     fn spawn(&self, code_cli: &Path, args: &[&str]) -> std::io::Result<u32>;
     /// Is this exact PID still alive?
     fn is_alive(&self, pid: u32) -> bool;
-    /// Ask this exact PID to close gracefully (mac: SIGTERM; Windows:
-    /// `taskkill` without `/F`) so VS Code gets a chance to save window and
-    /// profile state before exiting.
+    /// Ask this exact PID to close gracefully (mac: `osascript ... quit`,
+    /// M0's own mechanism; Windows: `taskkill` without `/F`) so VS Code gets
+    /// a chance to save window and profile state before exiting. The
+    /// caller (`stop_and_wait`, below) always polls `is_alive` on this same
+    /// PID afterward, so exact-PID scoping holds even where the underlying
+    /// mechanism (mac's `osascript`) can only target the app as a whole.
     fn request_graceful_close(&self, pid: u32);
     /// Force-kill this exact PID (last resort, only ever a PID we spawned).
     fn force_kill(&self, pid: u32);

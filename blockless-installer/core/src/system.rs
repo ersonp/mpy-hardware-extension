@@ -80,20 +80,25 @@ mod mac {
         fn is_alive(&self, pid: u32) -> bool {
             run_ok(Command::new("kill").args(["-0", &pid.to_string()]))
         }
-        fn request_graceful_close(&self, pid: u32) {
-            // SIGTERM on the exact resolved Electron PID, not `osascript ...
-            // quit` (an app-wide signal): NOTES.md's registration section
-            // explicitly calls for owning teardown by PID rather than
-            // reaching for an app-wide quit. Open question, unverifiable
-            // from source and owed to the acceptance rig: does VS Code's
-            // Electron main process treat SIGTERM as equivalent to a normal
-            // quit for window/profile-state saving, the way `osascript
-            // quit` is known to (see `install-blockless.zsh`'s own comment
-            // on why it uses that path)? If the rig ever shows the panel
-            // failing to persist across the final foreground open, this is
-            // the first place to check.
-            let _ = Command::new("kill")
-                .args(["-TERM", &pid.to_string()])
+        fn request_graceful_close(&self, _pid: u32) {
+            // Ports `stop_code_and_wait`'s exact mechanism
+            // (`install-blockless.zsh`): `osascript ... quit`, which
+            // provably saves window/profile state, not SIGTERM. A prior
+            // version of this sent SIGTERM to the exact resolved PID
+            // instead, on the theory that it's more precisely scoped than
+            // an app-wide quit -- but that traded a proven mechanism for an
+            // unverifiable one: this sandbox has no way to confirm whether
+            // VS Code's Electron main process treats SIGTERM as equivalent
+            // to a normal quit for state-saving, and shipping that guess on
+            // the exact path the panel-auto-open fix depends on is the
+            // wrong trade. AppleScript's `tell application ... quit` can
+            // only target by application, not PID, but the exact-PID
+            // scoping this trait's callers rely on is unaffected: it's
+            // `stop_and_wait` (profile.rs) that polls `is_alive` on the one
+            // PID it cares about afterward, regardless of which mechanism
+            // asked the app to quit.
+            let _ = Command::new("osascript")
+                .args(["-e", r#"tell application "Visual Studio Code" to quit"#])
                 .status();
         }
         fn force_kill(&self, pid: u32) {
