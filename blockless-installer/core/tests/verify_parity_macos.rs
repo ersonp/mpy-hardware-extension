@@ -28,6 +28,10 @@ const EXT_ID: &str = "blockless.mpy-hardware-extension";
 const PY_EXT_ID: &str = "ms-python.python";
 const PYLANCE_ID: &str = "ms-python.vscode-pylance";
 const MPREMOTE_VERSION: &str = "1.28.0";
+/// What the fixture's stub `code` reports for `--version`, and nothing else on a
+/// real machine does. Doubles as the marker that the script resolved the stub
+/// rather than an installed editor.
+const STUB_CODE_VERSION: &str = "1.99.0";
 
 fn temp_home(name: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -138,7 +142,7 @@ fn build_fixture(name: &str, brk: Break) -> Fixture {
         r#"#!/usr/bin/env zsh
 if [[ "$1" == "--version" ]]; then
   {version_early_exit}
-  print -r -- "1.99.0"
+  print -r -- "{STUB_CODE_VERSION}"
   print -r -- "abcdef0123456789"
   print -r -- "arm64"
   exit 0
@@ -273,15 +277,43 @@ exit 1
     }
 }
 
-fn run_real_script(fixture: &Fixture) -> (Vec<bool>, i32) {
+/// The system-wide applications root both sides are pointed at: a directory
+/// under the fixture that is deliberately never created, so the system `code`
+/// candidate cannot match and resolution falls through to the fixture's stub.
+fn no_system_apps(home: &Path) -> PathBuf {
+    home.join("NoSystemApps")
+}
+
+fn run_real_script(fixture: &Fixture, brk: Break) -> (Vec<bool>, i32) {
     let script =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/macos/verify-blockless.zsh");
+    // Faking $HOME is not enough on its own. The script's FIRST `code` candidate
+    // is an absolute /Applications path, which no amount of $HOME redirection can
+    // shadow, so on a developer machine with VS Code installed the script resolved
+    // the REAL editor and answered every check about that machine instead of the
+    // fixture. Point the system-wide root at a directory the fixture deliberately
+    // never creates, so resolution falls through to the fixture's own stub.
     let output = Command::new("zsh")
         .arg(&script)
         .env("HOME", &fixture.home)
+        .env("BLOCKLESS_APPS_ROOT", no_system_apps(&fixture.home))
         .output()
         .expect("failed to run verify-blockless.zsh (is zsh installed?)");
     let stdout = String::from_utf8_lossy(&output.stdout);
+    // Prove the redirection actually took, rather than trusting it. The stub is
+    // the only `code` that reports this version, so check 1 naming anything else
+    // means a real editor answered and the whole comparison below is about the
+    // wrong machine -- which fails loudly here instead of as seven confusing
+    // per-check divergences. Skipped for CodeCli, whose stub exits before
+    // printing a version on purpose.
+    if brk != Break::CodeCli {
+        assert!(
+            stdout.contains(STUB_CODE_VERSION),
+            "verify-blockless.zsh resolved a `code` outside the fixture: check 1 did not report \
+             the stub version {STUB_CODE_VERSION}. BLOCKLESS_APPS_ROOT is not being honoured, so \
+             this run is reading the host machine.\n{stdout}"
+        );
+    }
     let bits: Vec<bool> = stdout
         .lines()
         .filter_map(|l| {
@@ -388,6 +420,9 @@ fn run_rust_checks(fixture: &Fixture) -> (Vec<bool>, bool) {
         target_os: "macos".to_string(),
         target_arch: "aarch64".to_string(),
         home: Some(fixture.home.to_string_lossy().into_owned()),
+        // Must match what run_real_script exports, or the two sides resolve
+        // different `code` binaries and the comparison is meaningless.
+        apps_root: Some(no_system_apps(&fixture.home).to_string_lossy().into_owned()),
         ..Default::default()
     };
     let candidates = platform::code_cli_candidates(Os::MacOs, &raw).unwrap();
@@ -411,7 +446,7 @@ fn run_rust_checks(fixture: &Fixture) -> (Vec<bool>, bool) {
 
 fn assert_parity(name: &str, brk: Break) {
     let fixture = build_fixture(name, brk);
-    let (script_bits, script_exit) = run_real_script(&fixture);
+    let (script_bits, script_exit) = run_real_script(&fixture, brk);
     let (rust_bits, rust_overall) = run_rust_checks(&fixture);
 
     assert_eq!(

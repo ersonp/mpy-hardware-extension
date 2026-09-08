@@ -55,6 +55,18 @@ pub struct RawEnv {
     /// from the compiled target, matching the M0 script's win32-arm64-user vs
     /// win32-x64-user split (`$env:PROCESSOR_ARCHITECTURE -eq "ARM64"`).
     pub processor_architecture: Option<String>,
+    /// The system-wide applications directory (macOS), `/Applications` when unset.
+    ///
+    /// Every other path here derives from an environment variable, so a test can
+    /// redirect it by fabricating a `RawEnv`. The system `code` candidate could
+    /// not: it was the absolute literal `/Applications`, which no fabricated
+    /// value can shadow. On any machine with VS Code actually installed, the
+    /// script-parity suite therefore resolved the REAL editor and answered its
+    /// checks about that machine rather than the fixture -- invisibly on Linux,
+    /// where `/Applications` does not exist and resolution fell through to the
+    /// fixture's stub. `BLOCKLESS_APPS_ROOT` is the same override the M0 verify
+    /// script reads, so both sides of the parity comparison redirect together.
+    pub apps_root: Option<String>,
 }
 
 impl RawEnv {
@@ -67,6 +79,7 @@ impl RawEnv {
             appdata: std::env::var("APPDATA").ok(),
             local_appdata: std::env::var("LOCALAPPDATA").ok(),
             processor_architecture: std::env::var("PROCESSOR_ARCHITECTURE").ok(),
+            apps_root: std::env::var("BLOCKLESS_APPS_ROOT").ok(),
         }
     }
 }
@@ -202,8 +215,9 @@ pub fn code_cli_candidates(os: Os, raw: &RawEnv) -> Result<Vec<PathBuf>, Platfor
                     .join("bin")
                     .join("code")
             };
+            let apps_root = raw.apps_root.as_deref().unwrap_or("/Applications");
             Ok(vec![
-                suffix(PathBuf::from("/Applications")),
+                suffix(PathBuf::from(apps_root)),
                 suffix(PathBuf::from(home).join("Applications")),
             ])
         }
