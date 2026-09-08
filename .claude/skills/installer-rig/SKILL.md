@@ -193,7 +193,13 @@ four**. Write two of four, not "the pins are proven".
 
 - **rustup.** `rust-toolchain.toml` pins 1.98.1 with clippy and rustfmt, and rustup installs that
   toolchain on the first `cargo` run inside `blockless-installer/`.
-- **A linker, Windows only.** rustup's default host is `x86_64-pc-windows-msvc`, which links with
+- **A linker, and rustup does not bring one.** Both platforms need a system linker, neither CI
+  runner exposes the gap, and on a fresh machine `cargo test` dies before a single test runs.
+- **macOS: Xcode Command Line Tools.** `xcode-select -p` must print a path; if it does not,
+  `xcode-select --install`. `macos-latest` ships them, so CI cannot catch this either, and a
+  fresh UTM VM will not have them. Not a blocker for the rig itself, which runs a prebuilt
+  binary rather than compiling.
+- **Windows: VS Build Tools.** rustup's default host is `x86_64-pc-windows-msvc`, which links with
   `link.exe` from **VS Build Tools with the VCTools workload**. Without it `cargo test` dies with
   "linker `link.exe` not found" before a single test runs, so rustup alone is not enough on
   Windows. Install with:
