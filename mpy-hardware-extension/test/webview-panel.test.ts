@@ -1104,9 +1104,13 @@ test("a re-entrant start_session while a run is in-flight is rejected session_bu
     posted.length = 0; // isolate the re-entrant response
     await handler!({ type: "start_session", intent: "y", boardId: "esp32-s3-devkitc-1" });
     assert.ok(posted.some((m) => m.type === "session_busy"), "a second start while running is rejected session_busy");
+    // The refused start still re-affirms the boundary (defect 2 fix): a prior view-only-replay wipe
+    // would otherwise leave the webview's session_event drain armed until the NEXT successful build.
+    assert.deepEqual(posted.find((m) => m.type === "session_reset"), { type: "session_reset", generation: 0 }, "a busy refusal still closes the drain a prior wipe armed");
     assert.equal(llmCalls, 1, "the second start does not reach the loop (no duplicate run queued behind the held port)");
     // Mutation: drop the isRunning() pre-check -> the second start blocks on the held queue, posts no
     // session_busy here, and runs a duplicate after release (llmCalls would reach 2).
+    // Mutation: drop the handler-top session_reset post -> the boundary vanishes from posted here.
 
     releaseFetch();
     await running.catch(() => {});
@@ -3844,6 +3848,10 @@ test("retry_session is refused while a Save Version act is in flight (sibling en
     const commitP = handler({ type: "save_version_commit", message: "in flight" });
     await handler({ type: "retry_session" });
     assert.ok(posted.some((m) => m.type === "session_busy"), "retry_session is refused session_busy while a save is in flight");
+    // Same boundary re-affirmation as start_session's busy refusal (defect 2 fix, uniform across
+    // both run-entry points): retry never wipes the feed today, so this exit is unreachable in
+    // practice, but the invariant still holds by construction.
+    assert.deepEqual(posted.find((m) => m.type === "session_reset"), { type: "session_reset", generation: 0 }, "a retry-busy refusal still re-affirms the boundary");
     await commitP;
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
