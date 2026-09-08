@@ -36,7 +36,7 @@ import {
   postRebootLines,
   type FirmwareEvidence,
 } from "./firmware-evidence.ts";
-import { mockedDeploySteps, verdictBlockers } from "./e2e-verdict.ts";
+import { mockedDeploySteps, reportPredatesRun, verdictBlockers } from "./e2e-verdict.ts";
 import { canonicalPhase, resumePoint } from "./resume-point.ts";
 
 const DEFAULT_INTENT = "做一个温湿度监测仪，温度超过阈值就让蜂鸣器报警，OLED 屏幕显示读数";
@@ -97,6 +97,8 @@ const extRoot = fileURLToPath(new URL("../../", import.meta.url));
 // phase under test. The saved phase_complete carries both halves of a resume point: the
 // manifest to hand forward and the next_phase to hand it to.
 const resumeFrom = process.env.E2E_RESUME?.trim();
+// Taken before any phase runs: the verdict rejects a deploy_result.json older than this.
+const runStartedAt = Date.now();
 
 // E2E_PROJECT_DIR lets a single-phase iteration run beside a full one instead of fighting it
 // for tmp/e2e-v0. Combined with leaving E2E_REQUIRE_BOARD unset (no pre-flight probe), a
@@ -590,6 +592,10 @@ let mockedSteps: string[] = [];
 try {
   const reportPath = await findArtifact(projectDir, "deploy_result.json");
   if (!reportPath) throw new Error("no deploy_result.json anywhere under the project");
+  const reportMtimeMs = (await stat(reportPath)).mtimeMs;
+  if (reportPredatesRun(reportMtimeMs, runStartedAt)) {
+    throw new Error(`${relative(projectDir, reportPath)} was written at ${new Date(reportMtimeMs).toISOString()}, before this run started: it is a previous run's evidence`);
+  }
   const report = JSON.parse(await fsReadFile(reportPath, "utf-8"));
   firmwareBuilt = await builtProjectName();
   firmwareEvidence = classifyFirmwareEvidence(postRebootLines(report), firmwareBuilt);

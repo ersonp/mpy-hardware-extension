@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mockedDeploySteps, verdictBlockers, type VerdictInput } from "../src/cli/e2e-verdict.ts";
+import { mockedDeploySteps, reportPredatesRun, verdictBlockers, type VerdictInput } from "../src/cli/e2e-verdict.ts";
 
 // A run that passed everything the gate used to look at. Each test below changes ONE field, so a
 // blocker that appears is attributable to that field and nothing else.
@@ -241,4 +241,14 @@ test("mocked steps do not block when no board is required", () => {
 test("terminal is only gated when a board is required", () => {
   const blockers = verdictBlockers(passingRun({ boardExpected: false, terminalOk: false, terminal: "stalled" }));
   assert.deepEqual(blockers, []);
+});
+
+// An in-place resume keeps the previous run's deploy_result.json. If this run's deploy writes no
+// report of its own, that file is the newest one under the project and would be read as this
+// run's evidence. Age relative to the run start is what tells the two apart.
+test("a report written before the run started is not this run's evidence", () => {
+  const started = Date.parse("2026-09-02T10:00:00Z");
+  assert.equal(reportPredatesRun(started - 1, started), true);
+  assert.equal(reportPredatesRun(started, started), false);
+  assert.equal(reportPredatesRun(started + 60_000, started), false);
 });

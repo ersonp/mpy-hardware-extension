@@ -52,6 +52,16 @@ export function mockedDeploySteps(report: unknown): string[] {
   return mocked;
 }
 
+// Evidence has to come from THIS run. "Newest deploy_result.json under the project" says which
+// copy is current, not whose it is: an in-place resume (E2E_RESUME equal to E2E_PROJECT_DIR)
+// keeps the previous run's report, and a deploy that mocked every step and wrote its own report
+// only to stdout leaves that old file as the newest one there is. Its capture names the build,
+// its steps are not mocked, and the verdict passes on a board the run never touched. A report
+// written before the run started is not this run's evidence, whatever it says.
+export function reportPredatesRun(reportMtimeMs: number, runStartedAtMs: number): boolean {
+  return reportMtimeMs < runStartedAtMs;
+}
+
 // Why a mocked deploy has to be caught HERE rather than by reading the summary: a run that mocked
 // every device step printed "STALE DEVICE" and "MISMATCH" in its own output and still ended in
 // PASS, because the firmware evidence was computed, printed, and never consulted. The strongest
