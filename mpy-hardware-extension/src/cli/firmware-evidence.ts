@@ -47,8 +47,8 @@ const SCAFFOLD_BOOT_MARKER = /^(MPYHW_READY|starting scheduler)$/;
 // remove. Other escape forms (OSC, two-character) are deliberately NOT handled: no ESC byte at all
 // appears anywhere in the archived captures, so anything past CSI would be speculative.
 const ANSI_ESCAPE = /\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]/g;
-// Everything C0 except tab and \n; \n and \r are consumed by the line split in postRebootLines,
-// so neither reaches here and only tab is a deliberate survivor.
+// Everything C0 except tab and \n; \n and \r are consumed by the line split in
+// postRebootCaptureLines, so neither reaches here and only tab is a deliberate survivor.
 const CONTROL_BYTES = /[\x00-\x08\x0b-\x1f\x7f]/g;
 
 /** One capture line as the terminal rendered it: CSI sequences gone, backspaces applied.
@@ -58,7 +58,8 @@ const CONTROL_BYTES = /[\x00-\x08\x0b-\x1f\x7f]/g;
  * gone" would overstate what this does.
  *
  * One place this is deliberately NOT terminal rendering: a bare \r arrives here already split into
- * a separate line (see postRebootLines), because on a serial link \r alone is a line terminator.
+ * a separate line (see postRebootCaptureLines), because on a serial link \r alone is a line
+ * terminator.
  * A terminal would instead return the cursor and let the next text OVERWRITE this line, so text a
  * terminal never showed can survive as its own line. The cost is real but bounded -- an in-place
  * progress line would surface both its states, and if the overwritten half named the build, that

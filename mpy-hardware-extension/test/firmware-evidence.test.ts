@@ -319,8 +319,8 @@ const SERIAL_WITH_OWN_INTERRUPT = [
   ...SENSOR_INIT_FAILURE_LINES,
 ].join("\r\n");
 
-// The board here has no reboot line of its own, same as INTERRUPT_TRACEBACK's board -- the routine
-// Ctrl-C traceback is the only marker to slice on.
+// A healthy serial capture: it DOES print the reboot line, unlike INTERRUPT_TRACEBACK's board
+// (used for the final-reset side below), which has none.
 const SERIAL_SENSOR_ONLY = ["MPY: soft reboot", ...SENSOR_INIT_FAILURE_LINES].join("\r\n");
 
 test("a false crash: the serial capture's own interrupt does not amnesty the final reset's", () => {
@@ -392,4 +392,42 @@ test("a build that names itself across the pair still reads as ran", () => {
   const evidence = classifyFirmwareEvidence(lines, DHT11_NAME);
 
   assert.equal(evidence.kind, "ran");
+});
+
+// Isolated from the two-capture wiring above: these pin the findIndex (first-match) contract
+// itself, one marker at a time, inside a single capture. Per scope's review focus, a drift to
+// findLastIndex for either marker would let a SECOND marker amnesty a genuine crash that already
+// happened before it.
+
+test("a genuine crash between two interrupts still reads as a crash", () => {
+  // Mutation: switch interruptAt to findLastIndex and this returns "absent" -- the second
+  // interrupt becomes the slice point and swallows the crash sitting between the two.
+  const capture = [...INTERRUPT_TRACEBACK,
+                   "MPY: soft reboot",
+                   "Traceback (most recent call last):",
+                   '  File "main.py", line 13, in <module>',
+                   "ValueError: bad pin",
+                   "^C",
+                   "Traceback (most recent call last):",
+                   '  File "main.py", line 41, in <module>',
+                   "KeyboardInterrupt: "].join("\r\n");
+  const evidence = classifyFirmwareEvidence(postRebootLines({ final_reset_excerpt: capture }), DHT11_NAME);
+
+  assert.equal(evidence.kind, "crashed");
+  assert.match(describeFirmwareEvidence(evidence, DHT11_NAME), /RAISED on startup.*ValueError: bad pin/);
+});
+
+test("a genuine crash between two reboots still reads as a crash", () => {
+  // Mutation: switch rebootAt to findLastIndex and this returns "absent" -- the second reboot
+  // becomes the slice point and swallows the crash sitting between the two.
+  const capture = ["MPY: soft reboot",
+                   "Traceback (most recent call last):",
+                   '  File "main.py", line 13, in <module>',
+                   "ValueError: bad pin",
+                   "MPY: soft reboot",
+                   "MPYHW_READY"].join("\r\n");
+  const evidence = classifyFirmwareEvidence(postRebootLines({ final_reset_excerpt: capture }), DHT11_NAME);
+
+  assert.equal(evidence.kind, "crashed");
+  assert.match(describeFirmwareEvidence(evidence, DHT11_NAME), /RAISED on startup.*ValueError: bad pin/);
 });
