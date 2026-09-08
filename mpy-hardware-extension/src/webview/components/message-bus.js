@@ -62,13 +62,16 @@
         // Generate- or Retry-started run (setRunning(true) in HomeWorkbench.js and, for Retry, in
         // ActivityTimeline.js's retry card) — an optional-flow/gen-driver/MaixPy run dispatched without
         // going through either leaves it false, so a stale envelope racing ONE of those is not caught
-        // here (a pre-existing, narrower window than the one this fix closes; see /scope.md's
-        // Generate-click race).
+        // here (a pre-existing, narrower window than the one this fix closes).
         // Isolated per nested message: one throwing entry (a shape no producer emits today, but the
         // bundle's contents are still host-authored data) must not truncate the rest of the burst.
         if (msg.type === "restore_replay") {
           if (running) return;
-          for (const nested of msg.messages || []) { try { handleHostMessage(nested); } catch (e) { console.error("restore_replay: nested message failed", nested && nested.type, e); } }
+          // Array.isArray, not `|| []`: a non-iterable `messages` (a number, an object) throws at the
+          // for..of header itself, OUTSIDE the per-entry try below, losing the whole delivery rather
+          // than one entry of it. Host-authored today, so unreachable, and free to rule out.
+          const nestedMessages = Array.isArray(msg.messages) ? msg.messages : [];
+          for (const nested of nestedMessages) { try { handleHostMessage(nested); } catch (e) { console.error("restore_replay: nested message failed", nested && nested.type, e); } }
           return;
         }
         // Rich feed replay (Stage 1): the host maps DURABLE transcript events to these ungated messages, so

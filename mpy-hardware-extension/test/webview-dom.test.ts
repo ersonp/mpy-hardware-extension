@@ -735,7 +735,10 @@ test("a restore's bundled generation boundary un-drains the quota bar for a run 
   // Consumed, not dropped: the feed and terminal line actually rendered (tab replay is covered by
   // the panel.ts-level tests; this test is about the drain, not the tab markup).
   assert.match(document.getElementById("activity")!.textContent!, /an old session/, "the feed replayed");
-  assert.ok(document.getElementById("activity")!.children.length > 0, "the terminal line rendered too");
+  // Match the terminal line's own text, not a child COUNT: the restore_user card above already
+  // makes children.length > 0 true, so a count assertion passes with restore_done dropped entirely
+  // and pins nothing.
+  assert.match(document.getElementById("activity")!.textContent!, /Session ended: Done/, "the terminal line rendered too");
 
   // A stamped session_event reaching the controller relay WITHOUT any intervening start() (e.g. an
   // optional-flow startPhase() dispatched straight off this restored, resumable session) must still

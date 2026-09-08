@@ -2845,7 +2845,7 @@ function restorePanel(ws: string) {
   const posted: any[] = []; const raw: any[] = []; const infos: string[] = []; const errors: string[] = []; const commands: Array<{ cmd: string; path?: string }> = [];
   let handler: ((m: any) => Promise<void>) | undefined;
   // The restore burst now arrives as ONE atomic restore_replay envelope (fix: a Generate click
-  // landing mid-delivery used to render a stale tail into the new run — see /scope.md). `raw`
+  // landing mid-delivery used to render a stale tail into the new run). `raw`
   // keeps every actual postMessage call as-is (for asserting the atomicity itself); `posted`
   // unwraps the envelope so the content/order tests below, written against the pre-fix
   // per-message wire format, still see the same flat sequence.
