@@ -20,6 +20,13 @@ jobs:
       # clippy/rustfmt components) the first time cargo/rustup runs in this dir.
       - name: show pinned toolchain
         run: rustup show
+      # verify_parity_macos.rs shells out to verify-blockless.zsh by name. The
+      # script is plain text and file manipulation with no macOS-only APIs, so
+      # Linux zsh runs it correctly -- but ubuntu-latest ships no zsh at all,
+      # and without this every parity test fails NotFound rather than on
+      # anything it is meant to measure.
+      - name: install zsh (the mac parity suite shells out to it)
+        run: sudo apt-get update && sudo apt-get install -y zsh
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
       - name: cargo clippy
