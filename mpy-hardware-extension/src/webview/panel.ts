@@ -1962,6 +1962,16 @@ function wireWebview(vscode: any, webview: any, extensionUri: any, deps: PanelDe
       await refreshCredits();
     }
     if (message.type === "start_session") {
+      // Re-affirm the generation boundary before ANY guard below can refuse the click. A refused
+      // start still wipes a view-only replay's feed client-side (HomeWorkbench.js), which arms the
+      // webview's "drop stamped session_events until the boundary echoes back" drain; every exit
+      // past this point (busy, save-in-flight, protocol mismatch, sign-in required, a save that
+      // slipped in during the pre-run awaits) used to return without ever closing it, so the drain
+      // stayed armed until the next SUCCESSFUL build. Posting it unconditionally here, before the
+      // guards, covers all of them by construction instead of by patching each exit. Idempotent
+      // with controller.start()'s own post below: getGeneration() hasn't moved, so this just
+      // rewrites the webview's current boundary to the value it already has.
+      webview.postMessage({ type: "session_reset", generation: controller.getGeneration() });
       // Reject a re-entrant run at the entry point (register #1: the webview is not the trust
       // boundary). acquireRunOwnership() now HOLDS the queue for the whole run, so without this a
       // second start_session would block on the queue and then run a duplicate once the first run's
@@ -2024,6 +2034,12 @@ function wireWebview(vscode: any, webview: any, extensionUri: any, deps: PanelDe
       } finally { releaseRun(); } // free the port for device tools once the run reaches its terminal
     }
     if (message.type === "retry_session") {
+      // Same boundary re-affirmation as start_session, and for the same reason: every guard below
+      // can refuse the click, and none of them used to close the drain a prior wipe armed. Retry
+      // never wipes the feed today (register #1's caller-side gate), so this exit is unreachable in
+      // practice — kept anyway so the invariant is uniform across both run-entry points and a future
+      // wipe-then-retry path doesn't silently reopen this.
+      webview.postMessage({ type: "session_reset", generation: controller.getGeneration() });
       // Same re-entrancy guard as start_session: a stale retry must not queue behind the held run
       // and then re-issue the last turn after it finishes (register #1). retry() re-enters run().
       if (controller.isRunning()) { webview.postMessage({ type: "session_busy" }); return; }

@@ -69,8 +69,11 @@ test("webview start_session runs API-backed pipeline and renders generated outpu
     // manifest_updated now drives a derived diagram_updated (Wiring/Diagram tabs). session_reset
     // leads every start() (defect 2 fix): the generation boundary the webview's restore-triggered
     // session_event drain needs to end, posted unconditionally so a build after a restore is covered
-    // without the controller having to know a client-side wipe is pending.
-    assert.deepEqual(posted.map((message) => message.type), ["session_reset", "trace_event", "manifest_updated", "diagram_updated", "code_updated", "trace_event", "files_written", "session_done"]);
+    // without the controller having to know a client-side wipe is pending. It appears twice here:
+    // once from the start_session handler itself (re-affirmed before any refusal guard can return
+    // early) and once from controller.start()'s own post — idempotent, since the generation hasn't
+    // moved between the two.
+    assert.deepEqual(posted.map((message) => message.type), ["session_reset", "session_reset", "trace_event", "manifest_updated", "diagram_updated", "code_updated", "trace_event", "files_written", "session_done"]);
     assert.equal(posted.at(-1).terminal, "generated");
     assert.match(posted.find((message) => message.type === "code_updated").code, /MPYHW_READY/);
     // Files land under the open workspace (not a fallback), so no "saved here" notice.
@@ -310,7 +313,11 @@ test("webview blocks sessions when the remote protocol version mismatches the bu
   createPanel(vscode, {}, { apiBaseUrl: "http://api.test", fetchImpl });
   await handler?.({ type: "start_session", intent: "blink an led", boardId: "esp32-s3-devkitc-1" });
 
+  // session_reset leads every start_session exit, including this one (defect 2 fix): a refused
+  // start still closes the drain a prior view-only-replay wipe armed, so the quota bar doesn't
+  // freeze until the next successful build.
   assert.deepEqual(posted, [
+    { type: "session_reset", generation: 0 },
     { type: "session_error", error: "protocol_version_mismatch" },
     { type: "session_done", terminal: "session_error" },
   ]);
@@ -554,7 +561,10 @@ test("webview reports backend GitHub auth exchange failures", async () => {
   provider.resolveWebviewView(view);
   await handler?.({ type: "start_session", intent: "超过30度亮红灯", boardId: "esp32-s3-devkitc-1" });
 
+  // session_reset leads every start_session exit, including the auth gate's (defect 2 fix): see
+  // the protocol-mismatch test above for why.
   assert.deepEqual(posted, [
+    { type: "session_reset", generation: 0 },
     { type: "session_error", error: "github_token_exchange_failed" },
     { type: "session_done", terminal: "session_error" },
   ]);
