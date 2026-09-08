@@ -356,7 +356,7 @@ mod tests {
         assert_eq!(manifest.components.uv.version, "0.11.29");
         assert_eq!(manifest.components.mpremote.version, "1.28.0");
         assert_eq!(manifest.components.python.series, "3.12");
-        assert_eq!(manifest.components.extension.version, "0.4.2");
+        assert_eq!(manifest.components.extension.version, "0.4.3");
         assert_eq!(manifest.components.python_extension.id, "ms-python.python");
     }
 

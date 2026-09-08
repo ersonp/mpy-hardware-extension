@@ -40,7 +40,7 @@
     "extension": {
       "source": "bundled",
       "id": "blockless.mpy-hardware-extension",
-      "version": "0.4.2",
+      "version": "0.4.3",
       "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
       "path": "components/mpy-hardware-extension.vsix"
     },
