@@ -1238,17 +1238,21 @@ def test_llm_messages_transient_kinds_still_open_the_breaker(monkeypatch, kind, 
         _deepseek_breaker.reset()
 
 
-def test_llm_messages_kind_none_falls_back_to_status_for_the_breaker(monkeypatch):
+@pytest.mark.parametrize("status", [500, 408])
+def test_llm_messages_kind_none_falls_back_to_status_for_the_breaker(monkeypatch, status):
     # A monkeypatched test (or an old code path) that raises a bare UpstreamError has no kind.
     # The breaker gate must fall back to the pre-existing status check rather than treating an
     # unclassified error as automatically safe to ignore.
+    # 408 is here because the fallback and classify_upstream_rejection have to agree on what a
+    # timeout IS. They disagreed once, and a timeout reading transient in one path and terminal
+    # in the other is exactly the kind of split that survives a green suite.
     from app.routes_llm import UpstreamError, _deepseek_breaker
 
     monkeypatch.delenv("MPYHW_LLM_STUB", raising=False)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     monkeypatch.setattr(
         "app.routes_llm._open_deepseek_stream",
-        lambda _body, _api_key: (_ for _ in ()).throw(UpstreamError(500)),
+        lambda _body, _api_key: (_ for _ in ()).throw(UpstreamError(status)),
     )
     _deepseek_breaker.reset()
     try:
@@ -1257,7 +1261,7 @@ def test_llm_messages_kind_none_falls_back_to_status_for_the_breaker(monkeypatch
                 "/v1/llm/messages",
                 json={"messages": [{"role": "user", "content": "blink an ESP32 LED"}], "tools": [{"name": "device_command"}]},
             )
-        assert _deepseek_breaker.is_open(), "a bare 500 must still trip the breaker via the status fallback"
+        assert _deepseek_breaker.is_open(), f"a bare {status} must still trip the breaker via the status fallback"
     finally:
         _deepseek_breaker.reset()
 

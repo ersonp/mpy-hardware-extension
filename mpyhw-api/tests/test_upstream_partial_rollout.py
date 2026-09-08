@@ -216,6 +216,14 @@ def test_status_0_or_5xx_classifies_as_outage(status):
     assert classify_upstream_rejection(status, "") == "outage"
 
 
+def test_a_request_timeout_classifies_as_outage_so_it_stays_retryable():
+    # A 408 is a transient timeout, and the client's status rule auto-retries it. Were it to
+    # fall through to "rejected", the client's kind path would mark it NON-retryable and tell
+    # the user the provider refused the request, which is both wrong and terminal.
+    assert classify_upstream_rejection(408, "") == "outage"
+    assert classify_upstream_rejection(408, "request timeout") == "outage"
+
+
 # --- per-kind retry budgets in _open_deepseek_stream ------------------------------------
 
 

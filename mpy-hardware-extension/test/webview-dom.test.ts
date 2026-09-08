@@ -1661,6 +1661,28 @@ test("a llm_upstream_unavailable session_error renders friendly copy, not the ra
   assert.doesNotMatch(feed, /llm_upstream_unavailable/, "the raw machine kind is never shown");
 });
 
+test("a llm_upstream_auth session_error renders the operator copy, not the raw token", async () => {
+  const dom = await loadWebview();
+  const { document } = dom.window;
+
+  post(dom, { type: "session_error", error: "llm_upstream_auth" });
+
+  const feed = document.getElementById("activity")!.textContent!;
+  assert.match(feed, /needs the operator, not a retry/, "the friendly err_llm_upstream_auth copy shows");
+  assert.doesNotMatch(feed, /llm_upstream_auth/, "the raw machine kind is never shown");
+});
+
+test("a llm_upstream_rejected session_error renders friendly copy, not the raw token", async () => {
+  const dom = await loadWebview();
+  const { document } = dom.window;
+
+  post(dom, { type: "session_error", error: "llm_upstream_rejected" });
+
+  const feed = document.getElementById("activity")!.textContent!;
+  assert.match(feed, /provider refused the request/, "the friendly err_llm_upstream_rejected copy shows");
+  assert.doesNotMatch(feed, /llm_upstream_rejected/, "the raw machine kind is never shown");
+});
+
 test("a generic llm_upstream_error session_error renders friendly fallback copy", async () => {
   const dom = await loadWebview();
   const { document } = dom.window;

@@ -58,7 +58,10 @@ export function createLlmClient(deps: LlmClientDeps) {
         // guessing from the nested status: a quota 429 reads identically to a rate-limit 429
         // by status alone, and only the kind tells them apart. quota/auth/rejected are not
         // transient regardless of nested status; the message becomes the token the webview
-        // renders friendly copy for. Everything else keeps the existing retry ladders.
+        // renders friendly copy for. The other three kinds stay retryable, which is what keeps
+        // a nested timeout retryable: the server maps 408 to outage precisely so it does not
+        // land in `rejected` here and lose the auto-retry a kind-less response would still get
+        // from the status rule below.
         if (upstreamKind === "quota" || upstreamKind === "auth" || upstreamKind === "rejected") {
           detail = `llm_upstream_${upstreamKind}`;
         } else {

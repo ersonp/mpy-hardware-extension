@@ -154,7 +154,11 @@ def classify_upstream_rejection(status: int, body: str) -> str:
     client can get an actionable reason instead of a bare status code. Body-first wherever
     the body disambiguates a status that alone is ambiguous -- a 429 that means "recharge
     the account" is not the same failure as a 429 that means "slow down"."""
-    if status == 0 or status >= 500:
+    # 408 belongs here rather than in the 4xx fallthrough: a request timeout is transient in
+    # exactly the way an outage is, and the status-based rule this classifier replaces on the
+    # client already auto-retried it. Leaving it to fall through to "rejected" would quietly
+    # turn a retryable timeout into a terminal "the provider refused the request".
+    if status == 0 or status == 408 or status >= 500:
         return "outage"
     if status in (429, 402) and _QUOTA_REJECTION.search(body or ""):
         return "quota"

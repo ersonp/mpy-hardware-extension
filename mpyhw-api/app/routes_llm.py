@@ -114,8 +114,13 @@ class _CircuitBreaker:
 
 # A status that signals a transient upstream OUTAGE (worth tripping the breaker),
 # as opposed to a 4xx config/auth error (bad key, bad request) which should not.
+# A SUPERSET of classify_upstream_rejection's outage set, and deliberately so. 408 belongs
+# in both, and the two disagreeing about it is what let a timeout read as transient in one
+# path and terminal in the other. 429 belongs only here: classify splits it into
+# rate_limited or quota by reading the body, and a bare error has no body to split on.
+# Do not "align" the two sets by dropping it.
 def _is_outage_status(status: int) -> bool:
-    return status == 0 or status == 429 or status >= 500
+    return status == 0 or status == 408 or status == 429 or status >= 500
 
 
 _deepseek_breaker = _CircuitBreaker()
