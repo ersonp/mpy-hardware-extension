@@ -749,14 +749,17 @@ test("a restore's bundled generation boundary un-drains the quota bar for a run 
   assert.equal(document.getElementById("quota")!.classList.contains("hidden"), false, "the quota bar itself is shown");
 });
 
-// A REFUSED Generate is defect 2's own reachable trigger: a view-only replay leaves viewOnlyReplay
-// set, so the click's clearConversation() (HomeWorkbench.js) really does wipe the feed and arm the
-// real drain, and only THEN does the host get to refuse the resulting start_session. Everything here
-// is a production message shape — the replay bundle a real restore posts, the real Generate click
-// (not a hand call to markSessionEventsStale), and the two messages the FIXED start_session handler
-// now posts in order (session_reset re-affirmed before the busy guard, exactly like panel.ts).
-// Mutation: revert the handler-top post (or make sessionEventIsStale ignore the drain close) and the
-// quota bar stays frozen at 0 / hidden, and the credit line never flushes.
+// A REFUSED Generate is the only reachable trigger for a stranded drain today: a view-only replay
+// leaves viewOnlyReplay set, so the click's clearConversation() (HomeWorkbench.js) really does wipe
+// the feed and arm the real drain, and only THEN does the host get to refuse the resulting
+// start_session. Everything here is a production message shape — the replay bundle a real restore
+// posts, the real Generate click (not a hand call to markSessionEventsStale), and the two messages
+// the FIXED start_session handler now posts in order (session_reset re-affirmed before the busy
+// guard, exactly like panel.ts).
+// Mutation: revert onSessionReset's drainingFrames = false (or make sessionEventIsStale ignore the
+// drain close) and the quota bar stays frozen at 0 / hidden, and the credit line never flushes. This
+// DOM test cannot kill the panel-side mutation (it hand-feeds the host messages) — that half is
+// pinned in webview-panel.test.ts's busy/retry-busy/protocol/auth refusal assertions instead.
 test("a refused Generate after a view-only replay still closes the drain the wipe armed", async () => {
   const posted: any[] = [];
   const dom = await loadWebview(posted);
