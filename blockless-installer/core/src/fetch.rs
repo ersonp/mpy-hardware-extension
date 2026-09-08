@@ -162,7 +162,8 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpListener};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
 
     /// A tiny single-purpose HTTP/1.1 server: serves exactly `responses.len()`
     /// connections, one canned (status, body) response each, `Connection:
@@ -171,29 +172,39 @@ mod tests {
     /// the client's retry attempts).
     struct TestServer {
         addr: SocketAddr,
+        stop: Arc<AtomicBool>,
         handle: Option<std::thread::JoinHandle<()>>,
     }
 
     impl TestServer {
         /// A server that never receives the connections it expects must fail
         /// fast, not hang the test (and, if this were ever the real bug
-        /// instead of a deliberate mutation, not hang the whole CI job):
-        /// nonblocking `accept()` polled against a deadline, bailing the
-        /// thread (so `Drop`'s `join()` returns) if a connection never comes.
+        /// instead of a deliberate mutation, not hang the whole CI job). That
+        /// is `Drop`'s job: it signals `stop` and only then joins.
+        ///
+        /// It used to be a 5-second wall clock instead, which is a race rather
+        /// than a lifetime: the deadline began when the server started waiting,
+        /// not when the client did anything, so a loaded machine could burn it
+        /// before the request was sent. The thread then returned, dropped the
+        /// listener, and a pending connect was reset. Measured on Windows as an
+        /// intermittent ConnectionReset, the failing run taking 5.09s against
+        /// 0.1s clean, striking a different test almost every time and none of
+        /// them in isolation.
         fn start(responses: Vec<(u16, Vec<u8>)>) -> TestServer {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let addr = listener.local_addr().unwrap();
             listener.set_nonblocking(true).unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread_stop = Arc::clone(&stop);
             let handle = std::thread::spawn(move || {
                 for (status, body) in responses {
-                    let deadline = std::time::Instant::now() + Duration::from_secs(5);
                     let mut stream = loop {
+                        if thread_stop.load(Ordering::Relaxed) {
+                            return;
+                        }
                         match listener.accept() {
                             Ok((s, _)) => break s,
                             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                if std::time::Instant::now() >= deadline {
-                                    return;
-                                }
                                 std::thread::sleep(Duration::from_millis(5));
                             }
                             Err(_) => return,
@@ -227,13 +238,21 @@ mod tests {
                         "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         body.len()
                     );
-                    let _ = stream.write_all(head.as_bytes());
-                    let _ = stream.write_all(&body);
-                    let _ = stream.flush();
+                    // Surfaced, not discarded. A swallowed write error here reaches
+                    // the test as a confusing client-side "connection closed
+                    // without a response" instead of naming the side that failed.
+                    if let Err(e) = stream
+                        .write_all(head.as_bytes())
+                        .and_then(|()| stream.write_all(&body))
+                        .and_then(|()| stream.flush())
+                    {
+                        eprintln!("test server failed to write its response: {e}");
+                    }
                 }
             });
             TestServer {
                 addr,
+                stop,
                 handle: Some(handle),
             }
         }
@@ -245,6 +264,9 @@ mod tests {
 
     impl Drop for TestServer {
         fn drop(&mut self) {
+            // Signal BEFORE joining, or a server still waiting for a connection
+            // nobody will make would hang the suite.
+            self.stop.store(true, Ordering::Relaxed);
             if let Some(h) = self.handle.take() {
                 let _ = h.join();
             }
