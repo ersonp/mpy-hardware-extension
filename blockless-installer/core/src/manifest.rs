@@ -360,28 +360,39 @@ mod tests {
         assert_eq!(manifest.components.python_extension.id, "ms-python.python");
     }
 
-    /// Both `components.uv.sha256.*` (all 4 platforms) and
-    /// `components.extension.sha256` are deliberate all-zero placeholders in
-    /// the committed manifest -- release-assets.githubusercontent.com and
-    /// the real VSIX build were both unreachable/unavailable at commit time
-    /// (see STATUS.json's issues), so shipping a wrong-but-plausible-looking
-    /// digest would be worse than shipping one that visibly refuses every
-    /// real download/install (`fetch::fetch_and_verify` /
-    /// `extensions::ensure_extensions`'s `VsixShaMismatch`, both fail
-    /// closed). This test is the canary: it fails the moment either group
-    /// gets stamped with a real value without this test being updated to
-    /// match, so the placeholder state can never silently persist unnoticed
-    /// -- see `extension.sha256`'s equivalent ops-level canary in
+    /// `components.uv.sha256.*` (all 4 platforms) now carry the real uv
+    /// 0.11.29 checksums, fetched from each asset's published `.sha256` file
+    /// at `github.com/astral-sh/uv/releases/download/0.11.29/` and
+    /// independently re-verified against a downloaded archive. Only
+    /// `components.extension.sha256` stays a deliberate all-zero
+    /// placeholder -- the real VSIX build is stamped later, by
+    /// `mpy-hardware-extension/scripts/stamp-installer-manifest.mjs`, never
+    /// by hand here. This test is the canary for BOTH groups: it fails the
+    /// moment any single pin is silently changed (a real uv value swapped
+    /// for a different one, or the extension placeholder accidentally
+    /// stamped) without this test being updated to match -- see
+    /// `extension.sha256`'s equivalent ops-level canary in
     /// `ops::tests::install_against_the_unmodified_committed_manifest_refuses_the_real_vsix`.
     #[test]
-    fn committed_manifest_sha256_pins_are_still_the_documented_placeholder() {
+    fn committed_manifest_sha256_pins_are_the_documented_values() {
         let manifest = Manifest::parse(COMMITTED_MANIFEST).unwrap();
-        let placeholder = "0".repeat(64);
-        assert_eq!(manifest.components.uv.sha256.darwin_aarch64, placeholder);
-        assert_eq!(manifest.components.uv.sha256.darwin_x86_64, placeholder);
-        assert_eq!(manifest.components.uv.sha256.win32_x64, placeholder);
-        assert_eq!(manifest.components.uv.sha256.win32_arm64, placeholder);
-        assert_eq!(manifest.components.extension.sha256, placeholder);
+        assert_eq!(
+            manifest.components.uv.sha256.darwin_aarch64,
+            "61c04acc52a33ef0f331e494bdfbedcdb6c26c6970c022ed3699e5860f8930e3"
+        );
+        assert_eq!(
+            manifest.components.uv.sha256.darwin_x86_64,
+            "c4c4de482da9ccdd076dc4fb5cfe7b740609029385c72f58606be3153602387d"
+        );
+        assert_eq!(
+            manifest.components.uv.sha256.win32_x64,
+            "a047d55651bc3e0ca24595b25ec4cfcb10f9dca9fb56514e661269b37d4fae68"
+        );
+        assert_eq!(
+            manifest.components.uv.sha256.win32_arm64,
+            "55b597ae81bc29531a7c352a1431a8a73cc2755d7a5b9ec454580cbe02e5154f"
+        );
+        assert_eq!(manifest.components.extension.sha256, "0".repeat(64));
     }
 
     #[test]
@@ -454,7 +465,7 @@ mod tests {
     #[test]
     fn rejects_malformed_sha256() {
         let json = COMMITTED_MANIFEST.replacen(
-            r#""win32-arm64": "0000000000000000000000000000000000000000000000000000000000000000""#,
+            r#""win32-arm64": "55b597ae81bc29531a7c352a1431a8a73cc2755d7a5b9ec454580cbe02e5154f""#,
             r#""win32-arm64": "not-hex""#,
             1,
         );

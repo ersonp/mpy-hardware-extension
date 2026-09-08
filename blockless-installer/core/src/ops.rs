@@ -913,17 +913,16 @@ mod tests {
     fn install_against_the_unmodified_committed_manifest_refuses_the_real_vsix() {
         // The committed manifest's `extension.sha256` is a deliberate
         // all-zero placeholder (the real VSIX's hash is unknown at commit
-        // time -- release-assets.githubusercontent.com and the real VSIX
-        // build were both unavailable then; see STATUS.json's issues and
-        // `mpy-hardware-extension/scripts/stamp-installer-manifest.mjs`,
-        // which stamps the real value in outside this repo before a real
-        // rig run). This is a WIRING test, not a placeholder canary by
-        // itself: it proves `ops.rs` actually passes
+        // time; the real value is stamped in outside this repo, before a
+        // real rig run, by
+        // `mpy-hardware-extension/scripts/stamp-installer-manifest.mjs`).
+        // This is a WIRING test, not a placeholder canary by itself: it
+        // proves `ops.rs` actually passes
         // `manifest.components.extension.sha256` through to
         // `ensure_extensions` end to end (a fixture vsix, `b"vsix
         // contents"`, would refuse against ANY manifest sha it doesn't
         // equal -- placeholder or a real one that just doesn't match this
-        // fixture). `manifest::tests::committed_manifest_sha256_pins_are_still_the_documented_placeholder`
+        // fixture). `manifest::tests::committed_manifest_sha256_pins_are_the_documented_values`
         // is the actual canary that fails the moment the pin gets stamped
         // without a matching test update.
         let dir = temp_dir("unmodified-manifest-refuses-real-vsix");
