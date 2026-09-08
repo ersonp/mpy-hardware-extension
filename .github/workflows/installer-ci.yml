@@ -4,9 +4,19 @@ on:
   push:
     paths:
       - "blockless-installer/**"
+      # A change to the workflow, or to the line-ending rules the tests depend
+      # on, has to re-run the workflow. Without these two the fix for a red run
+      # can land and CI stays silent, still showing the old failure.
+      - ".github/workflows/installer-ci.yml"
+      - ".gitattributes"
   pull_request:
     paths:
       - "blockless-installer/**"
+      # A change to the workflow, or to the line-ending rules the tests depend
+      # on, has to re-run the workflow. Without these two the fix for a red run
+      # can land and CI stays silent, still showing the old failure.
+      - ".github/workflows/installer-ci.yml"
+      - ".gitattributes"
 
 jobs:
   ubuntu:
