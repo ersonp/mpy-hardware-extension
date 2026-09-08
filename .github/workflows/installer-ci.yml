@@ -27,6 +27,25 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+  macos:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: blockless-installer
+    steps:
+      - uses: actions/checkout@v4
+      - name: show pinned toolchain
+        run: rustup show
+      # macOS is half the acceptance rig and the primary dev platform, and two
+      # things here are true of no other runner. Its filesystem is
+      # case-insensitive by default, so sibling fixture paths differing only in
+      # case collide (ENOTDIR) where ubuntu sees two distinct paths and passes.
+      # And the mac script-parity suite (core/tests/verify_parity_macos.rs)
+      # shells out to verify-blockless.zsh, so running it on a real Mac is the
+      # closest CI gets to the rig.
+      - name: cargo test
+        run: cargo test --workspace
+
   windows:
     runs-on: windows-latest
     defaults:
