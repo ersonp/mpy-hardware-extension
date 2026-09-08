@@ -51,6 +51,22 @@ mod real_main {
         std::process::exit(1);
     }
 
+    /// A single ever-appended `logs/installer.log` (ARCHITECTURE §9), so a
+    /// repeat run's steps land alongside the first, matching §13's "a
+    /// second run logs every step as a skip". The returned guard must stay
+    /// alive for the process's lifetime -- dropping it early stops the
+    /// background writer thread and silently loses buffered log lines.
+    fn init_logging(logs_dir: &std::path::Path) -> tracing_appender::non_blocking::WorkerGuard {
+        let _ = std::fs::create_dir_all(logs_dir);
+        let file_appender = tracing_appender::rolling::never(logs_dir, "installer.log");
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+        tracing_subscriber::fmt()
+            .with_writer(non_blocking)
+            .with_ansi(false)
+            .init();
+        guard
+    }
+
     fn mac_install_targets(os: Os, raw: &RawEnv) -> Vec<PathBuf> {
         match os {
             Os::MacOs => {
@@ -111,6 +127,7 @@ mod real_main {
         let os = Os::detect(&raw).unwrap_or_else(|e| die(e));
         let arch = Arch::detect(os, &raw).unwrap_or_else(|e| die(e));
         let paths = Paths::resolve(os, &raw).unwrap_or_else(|e| die(e));
+        let _log_guard = init_logging(&paths.logs);
         let code_candidates = blockless_installer_core::platform::code_cli_candidates(os, &raw)
             .unwrap_or_else(|e| die(e));
         let targets = mac_install_targets(os, &raw);

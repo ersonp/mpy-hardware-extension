@@ -27,6 +27,7 @@ use crate::uninstall::{self, UninstallFlags, UninstallOutcome, UninstallRunner};
 use crate::verify::{self, VerifyInputs};
 use crate::vscode::{self, VscodeError};
 use std::path::{Path, PathBuf};
+use tracing::{info, warn};
 
 /// The union of every step module's injected capability, so ops.rs's
 /// functions take one trait object instead of five.
@@ -137,6 +138,7 @@ fn require_vsix(ctx: &OpsContext) -> Result<(), OpsError> {
 /// Steps 1, 2, 4 (never 3/runtime) -- ports `repair`'s scope exactly:
 /// detect-skip-do on VS Code, the extension, and settings.
 pub fn repair(env: &dyn Environment, ctx: &OpsContext) -> Result<State, OpsError> {
+    info!("repair: starting");
     require_vsix(ctx)?;
     let prior = read_prior_state_lenient(&ctx.paths.state);
     let seed = state::seed_from_prior(prior.as_ref(), "blockless");
@@ -152,11 +154,13 @@ pub fn repair(env: &dyn Environment, ctx: &OpsContext) -> Result<State, OpsError
         &ctx.update_api_url(),
         &ctx.paths.downloads,
         &ctx.fetch_opts,
-    )?;
+    )
+    .inspect_err(|e| warn!(error = %e, "repair: step 1 (vscode) failed"))?;
     current.product_version = vscode_outcome.product_version.clone();
     current.vscode_installed_by_us = seed.vscode_installed_by_us || vscode_outcome.installed_by_us;
     current.steps.vscode = true;
     stamp_and_write(&mut current, &ctx.paths.state)?;
+    info!("repair: step 1 (vscode) done");
 
     let ext_outcome = extensions::ensure_extensions(
         env,
@@ -174,7 +178,8 @@ pub fn repair(env: &dyn Environment, ctx: &OpsContext) -> Result<State, OpsError
         &seed.prior_ext_vsix_sha256,
         seed.profile_created_by_us,
         false,
-    )?;
+    )
+    .inspect_err(|e| warn!(error = %e, "repair: step 2 (extension) failed"))?;
     current.profile_created_by_us = ext_outcome.profile_created_by_us;
     current.ext_vsix_sha256 = ext_outcome.ext_vsix_sha256;
     current.steps.extension = true;
@@ -184,6 +189,7 @@ pub fn repair(env: &dyn Environment, ctx: &OpsContext) -> Result<State, OpsError
         current.profile_location = loc;
     }
     stamp_and_write(&mut current, &ctx.paths.state)?;
+    info!("repair: step 2 (extension) done");
 
     let settings_outcome = settings::ensure_settings(
         env,
@@ -194,11 +200,13 @@ pub fn repair(env: &dyn Environment, ctx: &OpsContext) -> Result<State, OpsError
         "blockless",
         &ctx.paths.env_python,
         &ctx.manifest.settings,
-    )?;
+    )
+    .inspect_err(|e| warn!(error = %e, "repair: step 4 (settings) failed"))?;
     current.profile_location = settings_outcome.profile_location;
     current.settings_mechanism = "A".to_string();
     current.steps.settings = true;
     stamp_and_write(&mut current, &ctx.paths.state)?;
+    info!("repair: step 4 (settings) done, repair finished");
 
     Ok(current)
 }
@@ -208,6 +216,7 @@ pub fn repair(env: &dyn Environment, ctx: &OpsContext) -> Result<State, OpsError
 /// (1, 2, 4) then 3 tacked on, so a fresh machine's env_python already
 /// exists by the time step 4 writes `mpyhw.pythonPath`.
 pub fn install(env: &dyn Environment, ctx: &OpsContext) -> Result<State, OpsError> {
+    info!("install: starting");
     require_vsix(ctx)?;
     let prior = read_prior_state_lenient(&ctx.paths.state);
     let seed = state::seed_from_prior(prior.as_ref(), "blockless");
@@ -233,11 +242,13 @@ pub fn install(env: &dyn Environment, ctx: &OpsContext) -> Result<State, OpsErro
         &ctx.update_api_url(),
         &ctx.paths.downloads,
         &ctx.fetch_opts,
-    )?;
+    )
+    .inspect_err(|e| warn!(error = %e, "install: step 1 (vscode) failed"))?;
     current.product_version = vscode_outcome.product_version.clone();
     current.vscode_installed_by_us = seed.vscode_installed_by_us || vscode_outcome.installed_by_us;
     current.steps.vscode = true;
     stamp_and_write(&mut current, &ctx.paths.state)?;
+    info!("install: step 1 (vscode) done");
 
     let ext_outcome = extensions::ensure_extensions(
         env,
@@ -255,7 +266,8 @@ pub fn install(env: &dyn Environment, ctx: &OpsContext) -> Result<State, OpsErro
         &seed.prior_ext_vsix_sha256,
         seed.profile_created_by_us,
         false,
-    )?;
+    )
+    .inspect_err(|e| warn!(error = %e, "install: step 2 (extension) failed"))?;
     current.profile_created_by_us = ext_outcome.profile_created_by_us;
     current.ext_vsix_sha256 = ext_outcome.ext_vsix_sha256;
     current.steps.extension = true;
@@ -265,6 +277,7 @@ pub fn install(env: &dyn Environment, ctx: &OpsContext) -> Result<State, OpsErro
         current.profile_location = loc;
     }
     stamp_and_write(&mut current, &ctx.paths.state)?;
+    info!("install: step 2 (extension) done");
 
     runtime::ensure_runtime(
         env,
@@ -278,9 +291,11 @@ pub fn install(env: &dyn Environment, ctx: &OpsContext) -> Result<State, OpsErro
         &ctx.paths.env_python,
         &ctx.paths.downloads,
         &ctx.fetch_opts,
-    )?;
+    )
+    .inspect_err(|e| warn!(error = %e, "install: step 3 (runtime) failed"))?;
     current.steps.python = true;
     stamp_and_write(&mut current, &ctx.paths.state)?;
+    info!("install: step 3 (runtime) done");
 
     let settings_outcome = settings::ensure_settings(
         env,
@@ -291,21 +306,29 @@ pub fn install(env: &dyn Environment, ctx: &OpsContext) -> Result<State, OpsErro
         "blockless",
         &ctx.paths.env_python,
         &ctx.manifest.settings,
-    )?;
+    )
+    .inspect_err(|e| warn!(error = %e, "install: step 4 (settings) failed"))?;
     current.profile_location = settings_outcome.profile_location;
     current.settings_mechanism = "A".to_string();
     current.steps.settings = true;
     stamp_and_write(&mut current, &ctx.paths.state)?;
+    info!("install: step 4 (settings) done");
 
     // Final: foreground open into the profile. Every earlier step that
     // spawned a child of its own (register_profile's window fallback) has
     // already closed it before returning, so this is always a fresh
     // extension host -- never an attach to a lingering child, never the
     // user's own session.
-    let _ = env.spawn(
-        &vscode_outcome.code_cli,
-        &["--profile", &ctx.manifest.profile_name, "--new-window"],
-    );
+    if env
+        .spawn(
+            &vscode_outcome.code_cli,
+            &["--profile", &ctx.manifest.profile_name, "--new-window"],
+        )
+        .is_err()
+    {
+        warn!("install: final foreground open failed to spawn");
+    }
+    info!("install: finished");
 
     Ok(current)
 }
@@ -314,6 +337,7 @@ pub fn install(env: &dyn Environment, ctx: &OpsContext) -> Result<State, OpsErro
 /// trusting `uv`'s own detect-and-reuse over a possibly-broken existing
 /// venv. Steps 1/2/4 are untouched.
 pub fn repair_runtime(env: &dyn Environment, ctx: &OpsContext) -> Result<State, OpsError> {
+    info!("repair-runtime: starting");
     let prior = read_prior_state_lenient(&ctx.paths.state);
     let mut current = prior.unwrap_or_default();
 
@@ -323,7 +347,9 @@ pub fn repair_runtime(env: &dyn Environment, ctx: &OpsContext) -> Result<State, 
             .map_err(|reason| OpsError::RemoveEnv {
                 path: env_dir.clone(),
                 reason,
-            })?;
+            })
+            .inspect_err(|e| warn!(error = %e, "repair-runtime: could not remove env/"))?;
+        info!("repair-runtime: removed existing env/");
     }
 
     runtime::ensure_runtime(
@@ -338,11 +364,13 @@ pub fn repair_runtime(env: &dyn Environment, ctx: &OpsContext) -> Result<State, 
         &ctx.paths.env_python,
         &ctx.paths.downloads,
         &ctx.fetch_opts,
-    )?;
+    )
+    .inspect_err(|e| warn!(error = %e, "repair-runtime: step 3 (runtime) failed"))?;
     current.mpremote_version = ctx.manifest.components.mpremote.version.clone();
     current.env_python = ctx.paths.env_python.to_string_lossy().into_owned();
     current.steps.python = true;
     stamp_and_write(&mut current, &ctx.paths.state)?;
+    info!("repair-runtime: step 3 (runtime) done");
 
     Ok(current)
 }
@@ -350,6 +378,7 @@ pub fn repair_runtime(env: &dyn Environment, ctx: &OpsContext) -> Result<State, 
 /// Force-reinstall the bundled VSIX regardless of the sha-match skip, and
 /// re-journal the sha. Steps 1/3/4 are untouched.
 pub fn update_extension(env: &dyn Environment, ctx: &OpsContext) -> Result<State, OpsError> {
+    info!("update-extension: starting");
     require_vsix(ctx)?;
     let prior = read_prior_state_lenient(&ctx.paths.state);
     let seed = state::seed_from_prior(prior.as_ref(), "blockless");
@@ -378,11 +407,13 @@ pub fn update_extension(env: &dyn Environment, ctx: &OpsContext) -> Result<State
         &seed.prior_ext_vsix_sha256,
         seed.profile_created_by_us,
         true, // force: bypass the sha-match skip
-    )?;
+    )
+    .inspect_err(|e| warn!(error = %e, "update-extension: step 2 (extension) failed"))?;
     current.profile_created_by_us = ext_outcome.profile_created_by_us;
     current.ext_vsix_sha256 = ext_outcome.ext_vsix_sha256;
     current.steps.extension = true;
     stamp_and_write(&mut current, &ctx.paths.state)?;
+    info!("update-extension: step 2 (extension) done");
 
     Ok(current)
 }
@@ -445,6 +476,7 @@ pub fn diagnostics(ctx: &OpsContext, target_zip: &Path) -> Result<(), OpsError> 
 }
 
 pub fn verify(env: &dyn Environment, ctx: &OpsContext) -> Vec<verify::CheckResult> {
+    info!("verify: starting");
     let inputs = VerifyInputs {
         code_candidates: &ctx.code_candidates,
         profile_name: &ctx.manifest.profile_name,
@@ -456,7 +488,14 @@ pub fn verify(env: &dyn Environment, ctx: &OpsContext) -> Vec<verify::CheckResul
         code_user: &ctx.paths.code_user,
         state_path: &ctx.paths.state,
     };
-    verify::run_checks(env, env, env, &inputs)
+    let results = verify::run_checks(env, env, env, &inputs);
+    let failed = results.iter().filter(|r| !r.pass).count();
+    if failed == 0 {
+        info!(checks = results.len(), "verify: all checks passed");
+    } else {
+        warn!(checks = results.len(), failed, "verify: some checks failed");
+    }
+    results
 }
 
 pub fn uninstall(
@@ -464,8 +503,13 @@ pub fn uninstall(
     ctx: &OpsContext,
     flags: &UninstallFlags,
 ) -> UninstallOutcome {
+    info!(
+        all = flags.all,
+        keep_vscode = flags.keep_vscode,
+        "uninstall: starting"
+    );
     let vscode_dirs = vscode_install_locations(ctx);
-    uninstall::uninstall(
+    let outcome = uninstall::uninstall(
         env,
         env,
         &ctx.paths.state,
@@ -475,7 +519,9 @@ pub fn uninstall(
         &ctx.paths.blk,
         &vscode_dirs,
         flags,
-    )
+    );
+    info!(outcome = ?outcome, "uninstall: finished");
+    outcome
 }
 
 /// Every location this OS's install could plausibly have put VS Code, not
@@ -769,6 +815,65 @@ mod tests {
                 .any(|args| args.contains(&"--new-window".to_string())),
             "install must end with a foreground open"
         );
+    }
+
+    /// A `tracing` writer that captures formatted output into a shared
+    /// buffer, so a test can assert on log content without a global
+    /// subscriber (which `tracing_subscriber::fmt().init()` would panic on
+    /// if a test process ever set two) -- `tracing::subscriber::with_default`
+    /// scopes this to the current thread for the duration of the closure.
+    #[derive(Clone, Default)]
+    struct CapturingWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for CapturingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn install_logs_every_step() {
+        // Proves ops.rs actually emits a log line per step (the reviewer's
+        // finding: nothing logged, so diagnostics bundled an empty logs/),
+        // not just that the tracing macro calls compile.
+        let dir = temp_dir("install-logs");
+        let manifest = test_manifest_matching(b"vsix contents");
+        let vsix = write_vsix(&dir, b"vsix contents");
+        let ctx = make_ctx(&dir, &manifest, &vsix);
+        let env = FakeEnvironment::new(&ctx.code_candidates[0], &vsix);
+
+        let writer = CapturingWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            install(&env, &ctx).unwrap();
+        });
+
+        let logged = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
+        for expected in [
+            "install: starting",
+            "install: step 1 (vscode) done",
+            "install: step 2 (extension) done",
+            "install: step 3 (runtime) done",
+            "install: step 4 (settings) done",
+            "install: finished",
+        ] {
+            assert!(
+                logged.contains(expected),
+                "missing {expected:?} in:\n{logged}"
+            );
+        }
     }
 
     #[test]
