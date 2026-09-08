@@ -655,6 +655,18 @@ test("a board picked during a view-only replay survives the wipe", async () => {
   assert.equal(start.boardId, "esp32-s3-devkitc-1", "the picked board reaches the new build");
   assert.equal(start.pre_selected_board.id, "esp32-s3-devkitc", "and its full record does too");
   assert.doesNotMatch(document.getElementById("activity")!.textContent!, /the old session/, "the replay is still wiped");
+
+  // The choice has to outlive the wipe, not just the first request. Reading it into a local before
+  // clearConversation() and never restoring it sent boardId "auto" on the NEXT request; the
+  // controller treats a boardId change as a fresh session and drops the state and traceId while the
+  // feed on screen keeps appending as if nothing happened.
+  post(dom, { type: "session_done", terminal: "generated" });
+  (document.getElementById("intent") as HTMLTextAreaElement).value = "now add a buzzer";
+  (document.getElementById("generate") as HTMLButtonElement).click();
+  const starts = posted.filter((m) => m.type === "start_session");
+  assert.equal(starts.length, 2);
+  assert.equal(starts[1].boardId, "esp32-s3-devkitc-1", "the follow-up request keeps the same board");
+  assert.equal(starts[1].pre_selected_board.id, "esp32-s3-devkitc");
 });
 
 test("session-restore feed rehydration: restore_done appends a terminal line, restore_reset clears", async () => {

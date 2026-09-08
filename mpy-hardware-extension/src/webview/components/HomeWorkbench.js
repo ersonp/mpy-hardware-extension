@@ -161,15 +161,15 @@
         if (running) { vscode.postMessage({ type: "cancel_session" }); setPending(tr("stopping")); return; }
         const intent = $("intent").value.trim();
         if (!intent) return;
-        // Read the board choice BEFORE the wipe below: clearConversation() calls clearBoardChoice(),
-        // so a board picked while reading a replayed session would be dropped without a trace.
+        // Read the board choice BEFORE the wipe and put it BACK after: clearConversation() calls clearBoardChoice(),
+        // and a choice that reached only this request would send "auto" on the next one -- a board CHANGE to the controller.
         const preSelectedBoard = selectedOfficialBoard;
         // A view-only replay leaves a PAST session's feed on screen, but this build gets its own fresh
         // session dir (the replay seeds no traceId). Leaving that history above the new run would show
         // two unrelated sessions as one conversation, and a later Save Version would cover only the
         // new half of what the user can see. Wipe the replay first. clearConversation() clears the flag
         // itself, so this fires once per replay and a normal follow-up request still appends.
-        if (viewOnlyReplay) clearConversation();
+        if (viewOnlyReplay) { clearConversation(); selectedOfficialBoard = preSelectedBoard; renderBoardPicker(); }
         document.querySelectorAll(".newdot").forEach((d) => d.remove());
         document.querySelectorAll(".tab .pulse").forEach((p) => p.remove());
         // Lock the session's UI language to the FIRST request's language before
