@@ -94,6 +94,31 @@ from 2026-08-05, and the ownership flags carried forward correctly: sticky
 `vscodeInstalledByUs: true` and `profileCreatedByUs: false`, so uninstall removed
 VS Code and kept the profile.
 
+**A macOS dialog appears on any Mac without Xcode Command Line Tools, and it
+is a known deviation from the acceptance criteria.** `uv python install` calls
+`install_name_tool` to patch the managed Python's dylib paths. That binary ships
+with CLT, so on a fresh Mac macOS pops:
+
+    The install_name_tool command requires the command line developer tools.
+    Would you like to install the tools now?
+
+It does NOT block: dismiss it and the install completes. uv logs
+`warning: Failed to patch the install name of the dynamic library`, which is
+also harmless for us, because the patch only matters when building native
+extensions and the runtime installs `mpremote`, `pyserial` and `platformdirs`,
+all pure Python. `verify` check 3 (pinned mpremote in env) passed on every rig
+run with the patch having failed.
+
+Two things follow. The acceptance says "cold install with no admin/security
+prompt", and this is a prompt, so a fresh-Mac demo will show it. And it is
+inherited: M0 uses the same uv-managed Python and takes the identical path.
+
+uv exposes no documented way to skip the patch (checked its environment-variable
+and installer references), so avoiding it means changing how the runtime is
+provisioned, not passing a flag. Left as a deviation deliberately, rather than
+pre-installing CLT on the rig, because that would make the demo pass by no
+longer being a fresh Mac while every real user still hits it.
+
 **UTM shared folders serve the guest stale copies.** A file changed on the host
 can still read as its old content in the VM, and two processes appending to one
 file on the share lose writes. Copy the folder to local disk in the guest and
