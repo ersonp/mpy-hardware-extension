@@ -450,6 +450,9 @@ mod tests {
         fn run_uv(&self, _uv_bin: &Path, _args: &[&str], _env: &[(&str, &str)]) -> bool {
             unimplemented!("verify never provisions")
         }
+        fn developer_tools_present(&self) -> bool {
+            unimplemented!("verify never provisions")
+        }
     }
 
     // --- individual check functions ---

@@ -49,6 +49,14 @@ pub trait RuntimeRunner {
     /// Run `<uv_bin> <args>` with `env` set in addition to the inherited
     /// environment. `true` on success.
     fn run_uv(&self, uv_bin: &Path, args: &[&str], env: &[(&str, &str)]) -> bool;
+    /// Are Xcode Command Line Tools (or a full Xcode) installed?
+    ///
+    /// Injected rather than probed inline, for the reason every other system
+    /// call here is: a first version read the real filesystem from inside
+    /// `ensure_runtime`, which made a unit test's result depend on what was
+    /// installed on the machine running it. It passed on a Mac with the tools
+    /// and failed on the Windows runner without them.
+    fn developer_tools_present(&self) -> bool;
 }
 
 fn uv_binary_name(os: Os) -> &'static str {
@@ -72,27 +80,19 @@ pub enum RuntimeStepOutcome {
 }
 
 /// Where a WORKING `install_name_tool` lives when the developer tools are
-/// installed.
+/// installed. Read by the real `RuntimeRunner`, never from inside this module.
 ///
 /// `/usr/bin/install_name_tool` is deliberately not in this list, and testing
 /// for it would be the obvious mistake: macOS ships a stub at that path whose
 /// entire job is to raise the "would you like to install the tools now?"
 /// dialog. Measured on a Mac with no developer tools: it is present, 118 KB,
 /// root:wheel. Existence there proves nothing.
-const DEVELOPER_TOOL_PATHS: [&str; 2] = [
+pub const DEVELOPER_TOOL_PATHS: [&str; 2] = [
     "/Library/Developer/CommandLineTools/usr/bin/install_name_tool",
     "/Applications/Xcode.app/Contents/Developer/usr/bin/install_name_tool",
 ];
 
-fn developer_tools_present() -> bool {
-    DEVELOPER_TOOL_PATHS.iter().any(|p| Path::new(p).exists())
-}
-
-/// A no-op `install_name_tool`, returned as the path to the directory holding
-/// it.
-///
-/// Split out from the decision so it can be tested: the caller's branch depends
-/// on what is installed on the machine running the test, this does not.
+/// A no-op `install_name_tool` written into `dir`.
 fn write_install_name_tool_shim(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let shim = dir.join("install_name_tool");
@@ -111,8 +111,8 @@ fn write_install_name_tool_shim(dir: &Path) -> std::io::Result<()> {
 /// otherwise work is suppressed. Failing to write the shim is not fatal: the
 /// worst case is the dialog we were trying to avoid, which is what happens
 /// today anyway.
-fn install_name_tool_shim(os: Os, blk: &Path) -> Option<String> {
-    if os != Os::MacOs || developer_tools_present() {
+fn install_name_tool_shim(os: Os, blk: &Path, developer_tools_present: bool) -> Option<String> {
+    if os != Os::MacOs || developer_tools_present {
         return None;
     }
     let dir = blk.join("toolshim");
@@ -198,7 +198,7 @@ pub fn ensure_runtime(
     // of it silences the dialog. Only where the real tool is absent: the patch
     // could not have happened there anyway, so nothing is suppressed that would
     // otherwise work.
-    let shim_path_entry = install_name_tool_shim(os, blk);
+    let shim_path_entry = install_name_tool_shim(os, blk, runner.developer_tools_present());
     let mut uv_env: Vec<(&str, &str)> =
         vec![("UV_PYTHON_INSTALL_DIR", python_install_dir.as_str())];
     if let Some(path_value) = shim_path_entry.as_deref() {
@@ -299,6 +299,13 @@ mod tests {
         /// sequence, flips `mpremote_version_result` to this (simulating a
         /// real provision landing).
         version_after_provision: RefCell<Option<String>>,
+        /// Deterministic on purpose. The first version of the shim probed the
+        /// real filesystem, so this answer came from whatever machine ran the
+        /// test: it passed on a Mac with the developer tools and failed on the
+        /// Windows runner without them. Defaults to `true`, meaning "tools
+        /// present, do not shim", so every existing test keeps asserting the
+        /// exact uv env it always did.
+        developer_tools: RefCell<bool>,
     }
 
     impl FakeRuntimeRunner {
@@ -310,6 +317,7 @@ mod tests {
                 run_uv_result: RefCell::new(true),
                 calls: RefCell::new(Vec::new()),
                 version_after_provision: RefCell::new(None),
+                developer_tools: RefCell::new(true),
             }
         }
     }
@@ -320,6 +328,9 @@ mod tests {
         }
         fn uv_version(&self, _uv_bin: &Path) -> Option<String> {
             self.uv_version_result.borrow().clone()
+        }
+        fn developer_tools_present(&self) -> bool {
+            *self.developer_tools.borrow()
         }
         fn extract_uv(&self, _archive: &Path, _dest_dir: &Path) -> Result<(), String> {
             let r = self.extract_uv_result.borrow().clone();
@@ -630,26 +641,79 @@ mod tests {
         );
     }
 
-    /// A machine WITH the developer tools must be left alone: shimming there
-    /// would suppress a patch that would really have worked. This asserts the
-    /// gate, whichever way the host running it happens to be set up.
+    /// Both branches, decided by the argument rather than by whatever is
+    /// installed on the machine running the test.
+    ///
+    /// The first version of this probed the real filesystem, so its answer
+    /// depended on the host: it passed on a Mac with the developer tools and
+    /// failed on the Windows runner without them. That is the same defect class
+    /// as a fixture reading the machine instead of its fixture, which this
+    /// component has now produced three times.
     #[test]
     fn shim_only_when_the_real_tool_is_missing() {
         let blk = temp_dir("shim-gate");
-        let decision = install_name_tool_shim(Os::MacOs, &blk);
-        if developer_tools_present() {
-            assert!(
-                decision.is_none(),
-                "developer tools are installed here, so PATH must be left alone"
-            );
-        } else {
-            let path = decision.expect("no developer tools here, so a shim was due");
-            assert!(
-                path.starts_with(&blk.join("toolshim").display().to_string()),
-                "the shim dir must come FIRST in PATH or the stub still wins: {path}"
-            );
-        }
-        // Windows never has this problem and must never be shimmed.
-        assert!(install_name_tool_shim(Os::Windows, &blk).is_none());
+
+        // Tools present: leave PATH alone, or we would suppress a patch that
+        // would really have worked.
+        assert!(install_name_tool_shim(Os::MacOs, &blk, true).is_none());
+
+        // Tools absent: shim, and the shim dir must come FIRST or the stub at
+        // /usr/bin still wins and the dialog still appears.
+        let path = install_name_tool_shim(Os::MacOs, &blk, false).expect("a shim was due");
+        assert!(
+            path.starts_with(&blk.join("toolshim").display().to_string()),
+            "the shim dir must come first in PATH: {path}"
+        );
+
+        // Windows never has this problem and must never be shimmed, whatever
+        // the flag says.
+        assert!(install_name_tool_shim(Os::Windows, &blk, false).is_none());
+    }
+
+    /// The env handed to uv must gain a PATH entry when the tools are absent,
+    /// and nothing else. Pins the wiring, not just the decision: run 8 showed a
+    /// working shim, but only because this reaches `run_uv`.
+    #[test]
+    fn shim_reaches_the_uv_invocation() {
+        let runner = FakeRuntimeRunner::new();
+        *runner.mpremote_version_result.borrow_mut() = None;
+        *runner.uv_version_result.borrow_mut() = Some("0.11.29".to_string());
+        *runner.version_after_provision.borrow_mut() = Some("mpremote 1.28.0".to_string());
+        *runner.developer_tools.borrow_mut() = false;
+
+        let dir = temp_dir("shim-wiring");
+        let blk = dir.join("blk");
+        let envpy = blk.join("env").join("bin").join("python");
+        let client = reqwest::blocking::Client::new();
+
+        ensure_runtime(
+            &runner,
+            &client,
+            Os::MacOs,
+            Arch::Arm64,
+            &manifest_uv(),
+            "3.12",
+            "1.28.0",
+            &blk,
+            &envpy,
+            &dir,
+            &fast_opts(),
+        )
+        .unwrap();
+
+        let calls = runner.calls.borrow();
+        let python_install = &calls[0];
+        let path_entry = python_install
+            .env
+            .iter()
+            .find(|(k, _)| k == "PATH")
+            .expect("no PATH entry, so uv would still find the real stub");
+        assert!(
+            path_entry
+                .1
+                .starts_with(&blk.join("toolshim").display().to_string()),
+            "shim dir must lead PATH: {}",
+            path_entry.1
+        );
     }
 }

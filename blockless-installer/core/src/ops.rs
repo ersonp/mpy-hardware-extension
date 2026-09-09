@@ -754,6 +754,12 @@ mod tests {
             }
             true
         }
+        /// Deterministic, never a filesystem probe: these tests assert on the
+        /// ops sequence and must not change answer with the machine running
+        /// them. `true` means "tools present, do not shim".
+        fn developer_tools_present(&self) -> bool {
+            true
+        }
     }
 
     impl UninstallRunner for FakeEnvironment {

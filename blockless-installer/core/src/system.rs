@@ -267,6 +267,13 @@ mod mac {
             }
             run_ok(&mut cmd)
         }
+        /// Checked by path, not by running anything: invoking the tool is what
+        /// raises the install-the-tools dialog we are trying to avoid.
+        fn developer_tools_present(&self) -> bool {
+            crate::runtime::DEVELOPER_TOOL_PATHS
+                .iter()
+                .any(|p| Path::new(p).exists())
+        }
     }
 
     impl UninstallRunner for MacEnvironment {
@@ -603,6 +610,12 @@ mod windows {
                 cmd.env(k, v);
             }
             run_ok(&mut cmd)
+        }
+        /// Not a Windows concern: `install_name_tool` is a macOS tool and uv
+        /// never reaches for it here. Answering true keeps the shim branch shut
+        /// on this platform regardless of anything else.
+        fn developer_tools_present(&self) -> bool {
+            true
         }
     }
 

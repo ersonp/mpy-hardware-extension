@@ -413,6 +413,9 @@ impl RuntimeRunner for ShellRuntime {
     fn run_uv(&self, _uv_bin: &Path, _args: &[&str], _env: &[(&str, &str)]) -> bool {
         unimplemented!()
     }
+    fn developer_tools_present(&self) -> bool {
+        unimplemented!("verify never provisions")
+    }
 }
 
 fn run_rust_checks(fixture: &Fixture) -> (Vec<bool>, bool) {
