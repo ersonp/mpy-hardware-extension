@@ -61,9 +61,35 @@ mod mac {
     }
 
     impl CommandRunner for MacEnvironment {
+        /// Match the whole app bundle, not the main executable.
+        ///
+        /// This looked for `.../Contents/MacOS/Electron`, ported faithfully from
+        /// the M0 scripts, which use that pattern in seven places. It matches
+        /// NOTHING on a real machine, for two compounding reasons: VS Code's
+        /// main binary is named `Code`, not `Electron`, and macOS will not let
+        /// `pgrep -f` read a hardened main process's argv at all, so even the
+        /// corrected path matches nothing. Measured against a running VS Code:
+        /// the `Electron` pattern found 0 processes, `.../MacOS/Code` found only
+        /// helpers, `pgrep -x Code` found 0, and this pattern found 19.
+        ///
+        /// So this returned an empty vec ALWAYS, and every guard keyed on it was
+        /// inert on macOS: uninstall never refused while VS Code was running, the
+        /// profile seed never skipped, and the settings writer's "never write
+        /// while VS Code is running" rule never held -- around `storage.json`,
+        /// which holds every profile and window state the user has. Observed on a
+        /// real VM: uninstall removed the profile with two windows open, and VS
+        /// Code recreated it.
+        ///
+        /// The helper processes are what this matches, and that is fine: they
+        /// exist only while VS Code does, which is precisely the question. Every
+        /// caller asks `is_empty()`, never for a specific pid.
+        ///
+        /// No test here can see this. `CommandRunner` is mocked at all eight test
+        /// sites, including the one that pins uninstall's refusal, so the trait
+        /// that makes the logic testable is what left this unexercised.
         fn running_vscode_pids(&self) -> Vec<u32> {
             let Some(out) = Command::new("pgrep")
-                .args(["-f", "Visual Studio Code.app/Contents/MacOS/Electron"])
+                .args(["-f", "Visual Studio Code.app"])
                 .output()
                 .ok()
             else {
