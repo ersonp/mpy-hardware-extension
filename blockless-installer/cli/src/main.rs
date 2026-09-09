@@ -28,7 +28,7 @@ fn main() {
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod real_main {
     use crate::cli::{Cli, Command};
-    use blockless_installer_core::fetch::FetchOptions;
+    use blockless_installer_core::fetch::{download_client, FetchOptions};
     use blockless_installer_core::manifest::Manifest;
     use blockless_installer_core::platform::{Arch, Os, Paths, RawEnv};
     use blockless_installer_core::state::State;
@@ -190,7 +190,7 @@ mod real_main {
             arch,
             paths,
             manifest: &manifest,
-            client: reqwest::blocking::Client::new(),
+            client: download_client().unwrap_or_else(|e| die(e)),
             fetch_opts: FetchOptions::default(),
             code_candidates,
             mac_install_targets: targets,

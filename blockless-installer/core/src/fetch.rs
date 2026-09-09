@@ -19,6 +19,36 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Bound the connect phase, not the transfer.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// `SO_KEEPALIVE`, so a connection that opens and then dies is detected by the
+/// OS rather than by a clock that cannot tell "dead" from "slow".
+const TCP_KEEPALIVE: Duration = Duration::from_secs(30);
+
+/// The client every download goes through.
+///
+/// `reqwest::blocking::Client::new()` must NEVER be used for an artifact
+/// fetch. Its default timeout is 30 seconds and covers connect, read AND
+/// write, so it caps the whole transfer. VS Code's universal build is 542 MB,
+/// which that budget clears only above roughly 152 Mbps sustained; below it
+/// every attempt dies mid-body with "error decoding response body", four times
+/// over, and the installer cannot install VS Code at all. Measured on a real
+/// macOS VM, and invisible to every test here, which serve tiny bodies from
+/// localhost, and to CI, which never touches a live endpoint. M0's
+/// `curl --retry 3` sets no total timeout and is unaffected.
+///
+/// So: no total timeout, a bounded connect, and keepalive to notice a peer
+/// that has gone away. A slow link takes as long as it takes.
+pub fn download_client() -> Result<reqwest::blocking::Client, reqwest::Error> {
+    reqwest::blocking::Client::builder()
+        // Proxy detection stays at its default, never `.no_proxy()`, so
+        // HTTPS_PROXY/HTTP_PROXY keep working.
+        .timeout(None)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .tcp_keepalive(TCP_KEEPALIVE)
+        .build()
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum FetchError {
     #[error("GET {url} failed after {attempts} attempt(s): {source}")]
