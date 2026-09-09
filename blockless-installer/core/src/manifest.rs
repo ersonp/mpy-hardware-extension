@@ -339,14 +339,23 @@ mod tests {
     use super::*;
 
     const COMMITTED_MANIFEST: &str = include_str!("../../manifest/installer.manifest.json");
-    /// HAND-AUTHORED SHAPE STAND-IN, NOT a recorded response -- this sandbox
-    /// has no route to `update.code.visualstudio.com` to capture one from.
-    /// See `tests/fixtures/README.md` for the exact rig steps to replace
-    /// this with a real capture (drop the `.SHAPE.` marker in the filename
-    /// once it's real). Its `sha256hash` is deliberately all-zeros, not a
-    /// plausible-looking digest, so it can never be mistaken for one.
-    const SHAPE_FIXTURE_UPDATE_API: &str =
-        include_str!("../tests/fixtures/vscode-update-api.darwin-universal.SHAPE.json");
+    /// A REAL response, captured from `update.code.visualstudio.com` on the
+    /// macOS acceptance rig on 2026-09-09. It replaces a hand-authored
+    /// stand-in that had stood in for a real capture because no environment
+    /// with a route to that host had ever run this.
+    ///
+    /// Worth keeping in mind when reading the assertions below: the previous
+    /// fixture asserted a shape nobody had ever observed, so the parse test
+    /// only proved the parser agreed with its author. This one carries a field
+    /// that stand-in did not have -- `notes` -- which is exactly the kind of
+    /// difference an invented fixture cannot surface.
+    ///
+    /// Version-specific values here go stale with every VS Code release. That
+    /// is fine and intended: this fixture pins the SHAPE, and
+    /// `live_update_api.rs`'s rig-only ignored test is what checks the live
+    /// response still matches it.
+    const CAPTURED_UPDATE_API: &str =
+        include_str!("../tests/fixtures/vscode-update-api.darwin-universal.json");
 
     #[test]
     fn committed_manifest_parses_and_validates() {
@@ -479,15 +488,29 @@ mod tests {
     }
 
     #[test]
-    fn resolver_parses_the_shape_fixture() {
-        // Proves the shape stand-in parses and the fields the resolver
-        // actually reads come through -- NOT proof the shape matches a real
-        // response (that's what `live_update_api.rs`'s rig-only ignored
-        // test is for).
-        let resp = VscodeUpdateApiResponse::parse(SHAPE_FIXTURE_UPDATE_API).unwrap();
-        assert_eq!(resp.product_version, "1.99.0");
+    fn resolver_parses_the_captured_response() {
+        // A real captured response now, so this proves the parser handles what
+        // the API actually sends, which the hand-authored stand-in could not.
+        // It is still not proof the LIVE response matches today -- that is
+        // `live_update_api.rs`'s rig-only ignored test.
+        let resp = VscodeUpdateApiResponse::parse(CAPTURED_UPDATE_API).unwrap();
+        assert_eq!(resp.product_version, "1.136.2");
         assert!(resp.url.starts_with("https://"));
-        assert_eq!(resp.sha256_hash, "0".repeat(64), "the fixture's sha must stay the obviously-fake placeholder, never a plausible-looking one");
+        // A real 64-hex digest, unlike the stand-in's deliberate all-zeros.
+        // Asserted by shape, not by value: the point is that the parser reads
+        // a genuine digest through, and pinning the literal would only mean
+        // re-editing this test on every VS Code release.
+        assert_eq!(resp.sha256_hash.len(), 64);
+        assert!(
+            resp.sha256_hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "sha256hash should be hex, got {}",
+            resp.sha256_hash
+        );
+        assert_ne!(
+            resp.sha256_hash,
+            "0".repeat(64),
+            "this fixture is a real capture; all-zeros would mean the stand-in came back"
+        );
     }
 
     #[test]

@@ -65,36 +65,65 @@ app-wide quit, no reliance on `open -gj`.
 
 ## Per-OS quirks observed
 
-_TODO: fill in as runs surface them (e.g. `/Applications` writability, profile not
-registered until first launch, arch detection, proxy behavior)._
+From the first macOS rig runs, 2026-09-09, on macOS 15.6.1 arm64 in UTM.
+
+**A running VS Code is not detectable by its main process.** `pgrep -f` could not
+read the main process's argv on one machine while it could on another, so any
+pattern aimed at `.../Contents/MacOS/<binary>` is unreliable. The binary is also
+named `Code`, not `Electron`, which the M0 scripts assumed in seven places. Match
+the app bundle instead: the helper processes are always visible and exist only
+while VS Code does.
+
+**The VS Code download is 542 MB.** Any total request timeout is a throughput
+floor in disguise. `reqwest`'s blocking client defaults to 30 seconds covering
+connect, read and write, which silently required ~152 Mbps sustained; below that
+every attempt died mid-body. On this rig the step took 54 seconds.
+
+**Extraction produces a flood of `xattr: Operation not permitted`.** Quarantine
+stripping cannot touch individual signed files inside the bundle. Harmless, and
+the install completes, but it makes install output hard to read and it hid the
+useful lines in the rig logs.
+
+**A `--keep-vscode` uninstall is a one-way door.** It removes `BLK`, which holds
+`state.json`, so any later uninstall has no ownership record and cannot remove
+VS Code. It ends up orphaned, removable only with `--all`, which deletes
+regardless of ownership. Test `--keep-vscode` last, or on its own machine.
+
+**An M0 tree upgrades cleanly.** `verify` returned 7/7 against a real M0 install
+from 2026-08-05, and the ownership flags carried forward correctly: sticky
+`vscodeInstalledByUs: true` and `profileCreatedByUs: false`, so uninstall removed
+VS Code and kept the profile.
+
+**UTM shared folders serve the guest stale copies.** A file changed on the host
+can still read as its old content in the VM, and two processes appending to one
+file on the share lose writes. Copy the folder to local disk in the guest and
+work there. Executing a binary from the share on the HOST, while the guest has
+it mounted, stalls for minutes.
 
 ## Acceptance checklist: replace the shape fixture with a real capture
 
-`core/tests/fixtures/vscode-update-api.darwin-universal.SHAPE.json` is a
-hand-authored stand-in (built in a sandbox with no route to
-`update.code.visualstudio.com`), not a recorded response, and its
-`sha256hash` is a deliberate all-zero placeholder rather than a
-plausible-looking digest. This is a required rig step, not optional
-cleanup — a fixture nobody observed only proves the parser agrees with
-itself.
+DONE, 2026-09-09, on the macOS rig.
+`core/tests/fixtures/vscode-update-api.darwin-universal.json` is now a real
+captured response and the hand-authored `.SHAPE.` stand-in is gone.
 
-1. On the rig: `curl https://update.code.visualstudio.com/api/update/darwin-universal/stable/latest`
-   (or just run the `#[ignore]`d test below, which does the same GET) and
-   save the raw response body.
-2. Record it as `core/tests/fixtures/vscode-update-api.darwin-universal.json`
-   (no `.SHAPE.` — that marker means "not real").
-3. `git rm core/tests/fixtures/vscode-update-api.darwin-universal.SHAPE.json`.
-4. Update `core/src/manifest.rs`: the `include_str!` path (drop `SHAPE_`
-   from the const name), and `resolver_parses_the_shape_fixture`'s name +
-   assertions (the real `sha256hash` won't be all-zeros anymore).
-5. Run `cargo test --workspace -- --ignored live_response_still_matches_captured_shape`
-   to confirm the live shape still parses against the freshly recorded
-   fixture.
-6. Full detail: `core/tests/fixtures/README.md`.
+It was worth doing rather than waving through: the real payload carries a
+`notes` field the stand-in did not have. A fixture nobody observed asserts a
+shape nobody has seen, so its parse test only proved the parser agreed with
+whoever wrote the fixture.
+
+Re-capture only when `live_update_api.rs`'s ignored test fails, which means the
+API's shape actually changed. The version-specific values going stale with each
+VS Code release is expected and is not a reason to re-record. Steps are in
+`core/tests/fixtures/README.md`.
 
 ## Pinned versions confirmed working
 
-- VS Code: (productVersion observed)
+Observed on the macOS rig, 2026-09-09, macOS 15.6.1 arm64.
+
+- VS Code: 1.136.2 (resolve-at-install, so this is what the API served that day)
 - uv: 0.11.29
-- Python: (3.12.x observed)
+- Python: 3.12.13 (uv-managed, `cpython-3.12.13-macos-aarch64-none`)
 - mpremote: 1.28.0
+
+Arch coverage: **darwin-aarch64 only, one of four.** The uv sha pins for
+darwin-x86_64, win32-x64 and win32-arm64 remain unproven by any install.

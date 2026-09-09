@@ -1,17 +1,14 @@
 //! Rig-only: proves the real update API's response still parses as
-//! `VscodeUpdateApiResponse` -- i.e. still matches the shape
-//! `tests/fixtures/vscode-update-api.darwin-universal.SHAPE.json` stands in
-//! for (that fixture is HAND-AUTHORED, not a recorded response; see
-//! `tests/fixtures/README.md`). Never run in CI or the sandbox -- both lack
-//! a route to `update.code.visualstudio.com` (see `/scope.md`: "No live
-//! third-party endpoints in CI").
+//! `VscodeUpdateApiResponse`, i.e. still matches
+//! `tests/fixtures/vscode-update-api.darwin-universal.json` -- which is now a
+//! REAL capture, taken on the macOS acceptance rig on 2026-09-09, replacing
+//! the hand-authored stand-in that stood in for one until then. Never run in
+//! CI or the sandbox: both lack a route to `update.code.visualstudio.com`
+//! (see `/scope.md`, "No live third-party endpoints in CI").
 //!
-//! Running this on the rig is also step 1 of replacing the shape fixture
-//! with a real capture: save this test's `body` as
-//! `tests/fixtures/vscode-update-api.darwin-universal.json` (drop the
-//! `.SHAPE.` marker), `git rm` the `.SHAPE.` file, and update
-//! `core/src/manifest.rs`'s fixture constant + test to match. See
-//! `tests/fixtures/README.md` for the full checklist.
+//! This failing is the signal to re-capture, and the only one: the fixture's
+//! version-specific values go stale with every VS Code release, which does not
+//! matter, because what it pins is the SHAPE. See `tests/fixtures/README.md`.
 
 use blockless_installer_core::manifest::VscodeUpdateApiResponse;
 
