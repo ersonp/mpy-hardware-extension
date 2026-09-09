@@ -71,6 +71,63 @@ pub enum RuntimeStepOutcome {
     Provisioned,
 }
 
+/// Where a WORKING `install_name_tool` lives when the developer tools are
+/// installed.
+///
+/// `/usr/bin/install_name_tool` is deliberately not in this list, and testing
+/// for it would be the obvious mistake: macOS ships a stub at that path whose
+/// entire job is to raise the "would you like to install the tools now?"
+/// dialog. Measured on a Mac with no developer tools: it is present, 118 KB,
+/// root:wheel. Existence there proves nothing.
+const DEVELOPER_TOOL_PATHS: [&str; 2] = [
+    "/Library/Developer/CommandLineTools/usr/bin/install_name_tool",
+    "/Applications/Xcode.app/Contents/Developer/usr/bin/install_name_tool",
+];
+
+fn developer_tools_present() -> bool {
+    DEVELOPER_TOOL_PATHS.iter().any(|p| Path::new(p).exists())
+}
+
+/// A no-op `install_name_tool`, returned as the path to the directory holding
+/// it.
+///
+/// Split out from the decision so it can be tested: the caller's branch depends
+/// on what is installed on the machine running the test, this does not.
+fn write_install_name_tool_shim(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let shim = dir.join("install_name_tool");
+    std::fs::write(&shim, "#!/bin/sh\nexit 0\n")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
+/// The `PATH` uv should run with, or `None` to leave it inherited.
+///
+/// Only ever shims where the real tool is absent, so nothing that would
+/// otherwise work is suppressed. Failing to write the shim is not fatal: the
+/// worst case is the dialog we were trying to avoid, which is what happens
+/// today anyway.
+fn install_name_tool_shim(os: Os, blk: &Path) -> Option<String> {
+    if os != Os::MacOs || developer_tools_present() {
+        return None;
+    }
+    let dir = blk.join("toolshim");
+    if let Err(e) = write_install_name_tool_shim(&dir) {
+        tracing::warn!("could not write the install_name_tool shim: {e}");
+        return None;
+    }
+    // The one place this module reads the process environment. Prepending
+    // requires knowing what to prepend to, and replacing PATH outright would
+    // take away whatever else uv needs to find.
+    let inherited = std::env::var("PATH").unwrap_or_default();
+    tracing::info!("no developer tools found; shimming install_name_tool for uv");
+    Some(format!("{}:{}", dir.display(), inherited))
+}
+
 /// The full step: detect/skip on the pinned mpremote -> ensure uv (detect or
 /// download+verify+extract) -> `uv python install` -> `uv venv` -> `uv pip
 /// install mpremote==<pinned>` -> verify.
@@ -126,7 +183,27 @@ pub fn ensure_runtime(
     let python_install_dir = blk.join("python").to_string_lossy().into_owned();
     let env_dir = blk.join("env").to_string_lossy().into_owned();
     let env_python_str = env_python.to_string_lossy().into_owned();
-    let uv_env = [("UV_PYTHON_INSTALL_DIR", python_install_dir.as_str())];
+
+    // uv patches the managed interpreter's dylib id with `install_name_tool`,
+    // which ships with Xcode Command Line Tools. On a Mac without them, macOS
+    // answers the exec with a dialog -- "The install_name_tool command requires
+    // the command line developer tools. Would you like to install the tools
+    // now?" -- during what is meant to be a one-click install. Measured on the
+    // rig: it does not block, and the patch failing is harmless here (it only
+    // matters when building native extensions, and this runtime installs
+    // mpremote, pyserial and platformdirs, all pure Python), but a system
+    // prompt mid-install is a real defect against the acceptance.
+    //
+    // uv resolves the tool through PATH, measured on the rig, so a no-op ahead
+    // of it silences the dialog. Only where the real tool is absent: the patch
+    // could not have happened there anyway, so nothing is suppressed that would
+    // otherwise work.
+    let shim_path_entry = install_name_tool_shim(os, blk);
+    let mut uv_env: Vec<(&str, &str)> =
+        vec![("UV_PYTHON_INSTALL_DIR", python_install_dir.as_str())];
+    if let Some(path_value) = shim_path_entry.as_deref() {
+        uv_env.push(("PATH", path_value));
+    }
 
     if !runner.run_uv(
         &uv_bin,
@@ -524,5 +601,55 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, RuntimeError::MpremoteVerifyFailed));
+    }
+
+    /// The shim has to be RUNNABLE and succeed, not merely exist. uv execs it
+    /// with `-id <dylib> <dylib>`; anything that is not an executable exiting 0
+    /// leaves uv failing, or worse, leaves macOS raising the developer-tools
+    /// dialog that this exists to prevent.
+    #[cfg(unix)]
+    #[test]
+    fn the_shim_is_executable_and_succeeds() {
+        let dir = temp_dir("shim").join("toolshim");
+        write_install_name_tool_shim(&dir).unwrap();
+        let shim = dir.join("install_name_tool");
+        assert!(shim.exists(), "no shim written");
+
+        // Exactly the invocation observed from uv on the rig.
+        let status = std::process::Command::new(&shim)
+            .args([
+                "-id",
+                "/tmp/libpython3.12.dylib",
+                "/tmp/libpython3.12.dylib",
+            ])
+            .status()
+            .expect("the shim should be executable");
+        assert!(
+            status.success(),
+            "the shim must exit 0, or uv treats the patch as failed"
+        );
+    }
+
+    /// A machine WITH the developer tools must be left alone: shimming there
+    /// would suppress a patch that would really have worked. This asserts the
+    /// gate, whichever way the host running it happens to be set up.
+    #[test]
+    fn shim_only_when_the_real_tool_is_missing() {
+        let blk = temp_dir("shim-gate");
+        let decision = install_name_tool_shim(Os::MacOs, &blk);
+        if developer_tools_present() {
+            assert!(
+                decision.is_none(),
+                "developer tools are installed here, so PATH must be left alone"
+            );
+        } else {
+            let path = decision.expect("no developer tools here, so a shim was due");
+            assert!(
+                path.starts_with(&blk.join("toolshim").display().to_string()),
+                "the shim dir must come FIRST in PATH or the stub still wins: {path}"
+            );
+        }
+        // Windows never has this problem and must never be shimmed.
+        assert!(install_name_tool_shim(Os::Windows, &blk).is_none());
     }
 }

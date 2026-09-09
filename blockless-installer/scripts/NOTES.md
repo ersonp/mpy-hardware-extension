@@ -109,15 +109,24 @@ extensions and the runtime installs `mpremote`, `pyserial` and `platformdirs`,
 all pure Python. `verify` check 3 (pinned mpremote in env) passed on every rig
 run with the patch having failed.
 
-Two things follow. The acceptance says "cold install with no admin/security
-prompt", and this is a prompt, so a fresh-Mac demo will show it. And it is
-inherited: M0 uses the same uv-managed Python and takes the identical path.
+It is inherited: M0 provisions the same uv-managed Python by the identical path,
+so every M0 install on a fresh Mac showed this too.
 
-uv exposes no documented way to skip the patch (checked its environment-variable
-and installer references), so avoiding it means changing how the runtime is
-provisioned, not passing a flag. Left as a deviation deliberately, rather than
-pre-installing CLT on the rig, because that would make the demo pass by no
-longer being a fresh Mac while every real user still hits it.
+**FIXED in M1.** uv documents no flag for skipping the patch, but it resolves
+`install_name_tool` through `PATH`, measured directly on the rig with a shim
+that recorded being called. So `runtime.rs` puts a no-op ahead of it, and only
+where the real tool is absent, checked against the CLT and Xcode paths rather
+than `/usr/bin/install_name_tool` -- that last one exists even on a machine with
+no developer tools, because it IS the stub that raises the dialog. On a machine
+that has the tools, nothing is shimmed and the real patch still runs.
+
+What that trades: with the shim in place uv believes the patch succeeded and
+stops warning, so the installer logs that it shimmed instead. Since the patch
+could not have worked on those machines anyway, no capability is lost.
+
+The alternative considered and rejected was pre-installing CLT on the rig. It
+would have made the demo pass by no longer being a fresh Mac, while every real
+user still hit the dialog.
 
 **UTM shared folders serve the guest stale copies.** A file changed on the host
 can still read as its old content in the VM, and two processes appending to one
