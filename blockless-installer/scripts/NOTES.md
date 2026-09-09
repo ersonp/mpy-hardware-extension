@@ -159,5 +159,42 @@ Observed on the macOS rig, 2026-09-09, macOS 15.6.1 arm64.
 - Python: 3.12.13 (uv-managed, `cpython-3.12.13-macos-aarch64-none`)
 - mpremote: 1.28.0
 
-Arch coverage: **darwin-aarch64 only, one of four.** The uv sha pins for
-darwin-x86_64, win32-x64 and win32-arm64 remain unproven by any install.
+## uv pin coverage: two separate questions
+
+"One of four" was too blunt and undersold what is verified. There are two
+levels, and only the second needs hardware.
+
+**Level 1, the pinned value is correct: 4 of 4.** Every asset for uv 0.11.29 was
+downloaded and hashed on 2026-09-09, and all four match the manifest. Derived by
+hashing the archives, not by re-reading the published `.sha256` files, so it does
+not just restate its own source.
+
+    darwin-aarch64  61c04acc52a33ef0f331e494bdfbedcdb6c26c6970c022ed3699e5860f8930e3
+    darwin-x86_64   c4c4de482da9ccdd076dc4fb5cfe7b740609029385c72f58606be3153602387d
+    win32-x64       a047d55651bc3e0ca24595b25ec4cfcb10f9dca9fb56514e661269b37d4fae68
+    win32-arm64     55b597ae81bc29531a7c352a1431a8a73cc2755d7a5b9ec454580cbe02e5154f
+
+Repeat with, from any machine:
+
+    curl -sSLO https://github.com/astral-sh/uv/releases/download/0.11.29/<asset>
+    shasum -a 256 <asset>
+
+**Level 2, the whole platform path works: 1 of 4.** An install on that
+architecture, proving `Arch::detect` picks the right key, `download_url` builds
+the right asset name, the download verifies against the pin, extraction works,
+and uv runs.
+
+| platform | proved by | status |
+| --- | --- | --- |
+| darwin-aarch64 | UTM macOS VM, 2026-09-09 | done |
+| win32-x64 | Windows Sandbox rig | not yet run |
+| darwin-x86_64 | an Intel Mac | no hardware |
+| win32-arm64 | Windows on ARM | no hardware |
+
+The last two are a hardware gap, not an oversight. Nobody on this project has
+either machine, so state it rather than implying the pins are unchecked: a wrong
+pin is ruled out by level 1 and would fail closed anyway. What level 2 catches
+that level 1 cannot is a wrong ARCH MAPPING, which would fetch the wrong asset
+and then fail its sha. `uv_download_url_embeds_the_manifest_version_and_right_asset`
+already unit-tests that mapping for every key, so level 2 adds the live
+confirmation that the mapping matches what the machine really is.
