@@ -179,7 +179,7 @@ Repeat with, from any machine:
     curl -sSLO https://github.com/astral-sh/uv/releases/download/0.11.29/<asset>
     shasum -a 256 <asset>
 
-**Level 2, the whole platform path works: 1 of 4.** An install on that
+**Level 2, the whole platform path works: 2 of 4.** An install on that
 architecture, proving `Arch::detect` picks the right key, `download_url` builds
 the right asset name, the download verifies against the pin, extraction works,
 and uv runs.
@@ -187,9 +187,13 @@ and uv runs.
 | platform | proved by | status |
 | --- | --- | --- |
 | darwin-aarch64 | UTM macOS VM, 2026-09-09 | done |
-| win32-x64 | Windows Sandbox on the Windows machine | not yet run |
+| win32-x64 | Windows Sandbox, 2026-09-10 | done |
 | win32-arm64 | **a UTM Windows 11 ARM64 VM** | reachable, not yet run |
 | darwin-x86_64 | an Intel Mac | no hardware |
+
+win32-x64 went end to end on the Sandbox rig: arch detection, URL, download, sha
+verification, extraction, and a working uv that then provisioned Python 3.12.13
+and mpremote 1.28.0.
 
 **Correction, 2026-09-10.** This table previously recorded win32-arm64 as a hardware
 gap. That was wrong. UTM runs Windows 11 ARM64 on Apple Silicon through Apple's
