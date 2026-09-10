@@ -12,6 +12,17 @@
 // TypeError, and the summary said "STALE DEVICE: nothing this run built reached the board" while
 // the file on the device was byte-identical to the one just uploaded. The two readings send you
 // at opposite bugs, so a crash has to be its own answer rather than a weak kind of foreign.
+//
+// That settles crashed-before-foreign. It does not settle ran-before-crashed: the owned check
+// below runs first and, on a match, returns before the crash check ever sees the lines. Per-capture
+// slicing makes that ordering easier to reach than it was before, because a marker in one capture
+// used to be able to eat an earlier capture's owned line along with it -- the same bug this file
+// exists to fix. With slicing per capture, an owned line in one capture reliably survives to
+// outrank a genuine crash in a LATER one, so a run whose final boot crashed can still classify as
+// `ran`. The final reset is by contract the LAST device operation, which is why it is the weak
+// spot: there is no capture after it for the crash to be the only evidence in. This needs a crash
+// that happens only on that later boot, not the one that already proved the build's name. A known
+// consequence of the ordering, not an oversight in it.
 export type FirmwareEvidence =
   | { kind: "ran"; line: string }
   | { kind: "crashed"; line: string }
