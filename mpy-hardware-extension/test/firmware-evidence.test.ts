@@ -431,3 +431,22 @@ test("a genuine crash between two reboots still reads as a crash", () => {
   assert.equal(evidence.kind, "crashed");
   assert.match(describeFirmwareEvidence(evidence, DHT11_NAME), /RAISED on startup.*ValueError: bad pin/);
 });
+
+test("a serial crash with no marker of its own still reads as a crash beside a marked final reset", () => {
+  // The serial capture has neither a reboot line nor an interrupt of its own, so its whole
+  // traceback is kept by the per-capture slice. On the old joined slice, the final reset's reboot
+  // marker was the ONLY one found, landing past the serial capture's lines in the joined array and
+  // discarding this traceback along with it, down to "absent". Fail-closed direction: pinned here
+  // rather than left uncovered.
+  const serial = [
+    "Traceback (most recent call last):",
+    '  File "main.py", line 9, in <module>',
+    "ValueError: bad pin",
+  ].join("\r\n");
+  const finalReset = ["MPY: soft reboot", "MPYHW_READY"].join("\r\n");
+  const lines = postRebootLines({ serial_excerpt: serial, final_reset_excerpt: finalReset });
+  const evidence = classifyFirmwareEvidence(lines, DHT11_NAME);
+
+  assert.equal(evidence.kind, "crashed");
+  assert.match(describeFirmwareEvidence(evidence, DHT11_NAME), /RAISED on startup.*ValueError: bad pin/);
+});
