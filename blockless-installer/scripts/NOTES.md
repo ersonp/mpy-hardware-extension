@@ -187,12 +187,25 @@ and uv runs.
 | platform | proved by | status |
 | --- | --- | --- |
 | darwin-aarch64 | UTM macOS VM, 2026-09-09 | done |
-| win32-x64 | Windows Sandbox rig | not yet run |
+| win32-x64 | Windows Sandbox on the Windows machine | not yet run |
+| win32-arm64 | **a UTM Windows 11 ARM64 VM** | reachable, not yet run |
 | darwin-x86_64 | an Intel Mac | no hardware |
-| win32-arm64 | Windows on ARM | no hardware |
 
-The last two are a hardware gap, not an oversight. Nobody on this project has
-either machine, so state it rather than implying the pins are unchecked: a wrong
+**Correction, 2026-09-10.** This table previously recorded win32-arm64 as a hardware
+gap. That was wrong. UTM runs Windows 11 ARM64 on Apple Silicon through Apple's
+Hypervisor framework, with the TPM emulation and Secure Boot that Windows 11 requires,
+so the same Mac that hosts the macOS rig can host an ARM64 Windows one. Only
+darwin-x86_64 is genuinely out of reach, since that needs an Intel Mac.
+
+Reaching win32-arm64 is worth more than one more pin. `Arch::detect` reads
+`%PROCESSOR_ARCHITECTURE%`, which is `ARM64` there, and that branch selects the
+`win32-arm64-user` VS Code build and the `aarch64-pc-windows-msvc` uv asset. It has
+never executed anywhere. Note that the Rust toolchain has to be
+`aarch64-pc-windows-msvc`, so the VS Build Tools linker prerequisite applies again on
+that VM.
+
+Only darwin-x86_64 is a hardware gap. Nobody on this project has an
+Intel Mac, so state it rather than implying the pins are unchecked: a wrong
 pin is ruled out by level 1 and would fail closed anyway. What level 2 catches
 that level 1 cannot is a wrong ARCH MAPPING, which would fetch the wrong asset
 and then fail its sha. `uv_download_url_embeds_the_manifest_version_and_right_asset`
