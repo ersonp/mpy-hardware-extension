@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   classifyFirmwareEvidence,
+  classifyFirmwareReport,
   describeFirmwareEvidence,
   postRebootLines,
   renderTerminalLine,
@@ -392,6 +393,24 @@ test("a build that names itself across the pair still reads as ran", () => {
   const evidence = classifyFirmwareEvidence(lines, DHT11_NAME);
 
   assert.equal(evidence.kind, "ran");
+});
+
+test("a later final-reset crash overrides an earlier owned boot line", () => {
+  const serial = ["MPY: soft reboot", `[t=1ms] ${DHT11_NAME} booting`].join("\r\n");
+  const finalReset = [...INTERRUPT_TRACEBACK,
+                      "Traceback (most recent call last):",
+                      '  File "main.py", line 13, in <module>',
+                      "ValueError: bad pin"].join("\r\n");
+
+  assert.equal(classifyFirmwareReport({ serial_excerpt: serial, final_reset_excerpt: finalReset }, DHT11_NAME).kind,
+               "crashed");
+});
+
+test("a later owned boot line overrides an earlier crash", () => {
+  const finalReset = ["MPY: soft reboot", `[t=2ms] ${DHT11_NAME} booting`].join("\r\n");
+
+  assert.equal(classifyFirmwareReport({ serial_excerpt: CRASHED_CAPTURE, final_reset_excerpt: finalReset }, DHT11_NAME).kind,
+               "ran");
 });
 
 // Isolated from the two-capture wiring above: these pin the findIndex (first-match) contract
