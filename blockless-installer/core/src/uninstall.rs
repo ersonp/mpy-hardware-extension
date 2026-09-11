@@ -230,7 +230,7 @@ pub fn uninstall(
             }
             any_existed = true;
             let removed = match runner.run_vscode_uninstaller(vscode_dir) {
-                Ok(true) => true,
+                Ok(true) => !vscode_dir.exists(),
                 Ok(false) => runner.remove_dir_all(vscode_dir).is_ok() && !vscode_dir.exists(),
                 Err(_) => false,
             };

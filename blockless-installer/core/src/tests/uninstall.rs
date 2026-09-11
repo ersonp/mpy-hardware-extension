@@ -446,6 +446,44 @@ fn vscode_installed_by_us_true_removes_it() {
 }
 
 #[test]
+fn successful_native_uninstaller_must_also_remove_the_directory() {
+    let l = layout("native-uninstaller-left-directory");
+    let mut state = default_state();
+    state.profile_created_by_us = false;
+    state.vscode_installed_by_us = true;
+    write_state(&l.state_path, &state);
+    std::fs::create_dir_all(&l.vscode_dir).unwrap();
+    let runner = FakeUninstallRunner::default();
+    *runner.uninstaller_result.borrow_mut() = Some(Ok(true));
+
+    let outcome = uninstall(
+        &not_running(),
+        &runner,
+        &l.state_path,
+        &l.storage_path,
+        &l.profiles_dir,
+        "Blockless",
+        &l.blk,
+        std::slice::from_ref(&l.vscode_dir),
+        &UninstallFlags::default(),
+    );
+
+    match outcome {
+        UninstallOutcome::Finished {
+            blk_removed,
+            vscode_removed,
+            ..
+        } => {
+            assert!(!vscode_removed);
+            assert!(!blk_removed);
+        }
+        other => panic!("expected Finished, got {other:?}"),
+    }
+    assert!(l.vscode_dir.exists());
+    assert!(l.state_path.exists(), "ownership journal must survive");
+}
+
+#[test]
 fn removes_every_existing_vscode_location_not_just_the_first() {
     // Mirrors the reviewer's finding: a mac install can plausibly have
     // landed at either /Applications or ~/Applications (`vscode.rs`'s
