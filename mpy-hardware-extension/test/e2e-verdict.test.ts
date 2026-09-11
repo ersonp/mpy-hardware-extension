@@ -239,6 +239,23 @@ test("mockedDeploySteps does not name a real clean", () => {
   );
 });
 
+// Once the canonical field exists it wins over the legacy fallback. Mixed-version artifacts can
+// retain mode: mock while a current producer explicitly records live evidence; treating that as
+// mocked would reject a real hardware run despite its authoritative field.
+test("mockedDeploySteps lets canonical live override a stale legacy mock mode", () => {
+  assert.deepEqual(
+    mockedDeploySteps({ upload_result: { mode: "mock", evidence_mode: "live" } }),
+    [],
+  );
+});
+
+test("mockedDeploySteps lets canonical mock override a legacy live mode", () => {
+  assert.deepEqual(
+    mockedDeploySteps({ upload_result: { mode: "live", evidence_mode: "mock" } }),
+    ["upload"],
+  );
+});
+
 test("mockedDeploySteps survives a missing, empty or malformed report", () => {
   assert.deepEqual(mockedDeploySteps(null), []);
   assert.deepEqual(mockedDeploySteps({}), []);

@@ -50,7 +50,7 @@ export function mockedDeploySteps(report: unknown): string[] {
     const step = record[key];
     if (!step || typeof step !== "object") continue;
     const s = step as Record<string, unknown>;
-    if (s.evidence_mode === "mock" || s.mode === "mock") {
+    if (s.evidence_mode === "mock" || (s.evidence_mode === undefined && s.mode === "mock")) {
       mocked.push(label);
     }
   }
