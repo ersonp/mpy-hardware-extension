@@ -163,6 +163,23 @@ for (const kind of ["outage", "rate_limited", "provider_rollout"]) {
   });
 }
 
+test("an unknown upstream kind falls back to nested status instead of becoming retryable by default", async () => {
+  const client = createLlmClient({
+    apiBaseUrl: "https://api.example",
+    fetchImpl: (async () => ({
+      ok: false,
+      status: 502,
+      json: async () => ({ detail: { error: "llm_upstream_error", status: 400, kind: "billing" } }),
+    })) as any,
+  });
+
+  await assert.rejects(client.streamMessages({ messages: [] }), (error: any) => {
+    assert.notEqual(error.retryable, true);
+    assert.equal(error.message, "llm_upstream_error");
+    return true;
+  });
+});
+
 test("a 429 from the LLM endpoint is retryable", async () => {
   const client = createLlmClient({
     apiBaseUrl: "https://api.example",

@@ -58,14 +58,20 @@ export function createLlmClient(deps: LlmClientDeps) {
         // guessing from the nested status: a quota 429 reads identically to a rate-limit 429
         // by status alone, and only the kind tells them apart. quota/auth/rejected are not
         // transient regardless of nested status; the message becomes the token the webview
-        // renders friendly copy for. The other three kinds stay retryable, which is what keeps
+        // renders friendly copy for. Only the three known transient kinds stay retryable, which is what keeps
         // a nested timeout retryable: the server maps 408 to outage precisely so it does not
         // land in `rejected` here and lose the auto-retry a kind-less response would still get
         // from the status rule below.
         if (upstreamKind === "quota" || upstreamKind === "auth" || upstreamKind === "rejected") {
           detail = `llm_upstream_${upstreamKind}`;
-        } else {
+        } else if (upstreamKind === "outage" || upstreamKind === "rate_limited" || upstreamKind === "provider_rollout") {
           retryable = true;
+        } else {
+          // The backend can deploy independently of the extension. Do not turn a newly-added,
+          // possibly terminal kind into an automatic retry in an older client; retain the
+          // legacy nested-status behavior until this client knows the kind's semantics.
+          retryable = typeof upstreamStatus === "number"
+            && (upstreamStatus === 0 || upstreamStatus === 408 || upstreamStatus === 429 || upstreamStatus >= 500);
         }
       } else {
         // No kind (old server, or a non-upstream error): the pre-existing status-based rule,
