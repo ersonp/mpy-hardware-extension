@@ -16,6 +16,7 @@
 //! `HTTPS_PROXY`/`HTTP_PROXY` from the environment automatically.
 
 use sha2::{Digest, Sha256};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -57,6 +58,13 @@ pub enum FetchError {
         attempts: u32,
         #[source]
         source: reqwest::Error,
+    },
+    #[error("reading response body from {url} failed after {attempts} attempt(s): {source}")]
+    BodyReadFailed {
+        url: String,
+        attempts: u32,
+        #[source]
+        source: std::io::Error,
     },
     #[error("sha256 mismatch for {url}: expected {expected}, got {actual}")]
     Sha256Mismatch {
@@ -108,56 +116,6 @@ pub fn fetch_and_verify(
     dest: &Path,
     opts: &FetchOptions,
 ) -> Result<(), FetchError> {
-    let bytes = fetch_with_retry(client, url, opts)?;
-    let actual = sha256_hex(&bytes);
-    if !actual.eq_ignore_ascii_case(expected_sha256_hex) {
-        return Err(FetchError::Sha256Mismatch {
-            url: url.to_string(),
-            expected: expected_sha256_hex.to_string(),
-            actual,
-        });
-    }
-    write_atomic(dest, &bytes)?;
-    Ok(())
-}
-
-fn fetch_with_retry(
-    client: &reqwest::blocking::Client,
-    url: &str,
-    opts: &FetchOptions,
-) -> Result<Vec<u8>, FetchError> {
-    let mut last_err = None;
-    for attempt in 0..opts.max_attempts.max(1) {
-        let result = client
-            .get(url)
-            .send()
-            .and_then(|resp| resp.error_for_status())
-            .and_then(|resp| resp.bytes());
-        match result {
-            Ok(bytes) => return Ok(bytes.to_vec()),
-            Err(e) => {
-                last_err = Some(e);
-                if attempt + 1 < opts.max_attempts {
-                    std::thread::sleep(opts.backoff_for(attempt));
-                }
-            }
-        }
-    }
-    Err(FetchError::RequestFailed {
-        url: url.to_string(),
-        attempts: opts.max_attempts.max(1),
-        source: last_err.expect("loop ran at least once"),
-    })
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let digest = hasher.finalize();
-    digest.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn write_atomic(dest: &Path, bytes: &[u8]) -> Result<(), FetchError> {
     let parent = dest.parent().ok_or_else(|| FetchError::Io {
         path: dest.to_path_buf(),
         source: std::io::Error::new(
@@ -177,229 +135,128 @@ fn write_atomic(dest: &Path, bytes: &[u8]) -> Result<(), FetchError> {
         ),
     })?;
     let tmp = parent.join(format!("{}.tmp", file_name.to_string_lossy()));
-    std::fs::write(&tmp, bytes).map_err(|source| FetchError::Io {
-        path: tmp.clone(),
-        source,
-    })?;
-    std::fs::rename(&tmp, dest).map_err(|source| FetchError::Io {
+    let actual = fetch_with_retry(client, url, &tmp, opts)?;
+    if !actual.eq_ignore_ascii_case(expected_sha256_hex) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(FetchError::Sha256Mismatch {
+            url: url.to_string(),
+            expected: expected_sha256_hex.to_string(),
+            actual,
+        });
+    }
+    replace_atomic(&tmp, dest).map_err(|source| FetchError::Io {
         path: dest.to_path_buf(),
         source,
-    })
+    })?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_atomic(tmp: &Path, dest: &Path) -> std::io::Result<()> {
+    std::fs::rename(tmp, dest)
+}
+
+#[cfg(windows)]
+fn replace_atomic(tmp: &Path, dest: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let from: Vec<u16> = tmp.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to: Vec<u16> = dest.as_os_str().encode_wide().chain(Some(0)).collect();
+    let ok = unsafe {
+        MoveFileExW(
+            from.as_ptr(),
+            to.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn fetch_with_retry(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    tmp: &Path,
+    opts: &FetchOptions,
+) -> Result<String, FetchError> {
+    enum AttemptError {
+        Request(reqwest::Error),
+        Body(std::io::Error),
+    }
+
+    let mut last_err: Option<AttemptError> = None;
+    for attempt in 0..opts.max_attempts.max(1) {
+        let response = client
+            .get(url)
+            .send()
+            .and_then(|resp| resp.error_for_status());
+        let mut response = match response {
+            Ok(response) => response,
+            Err(e) => {
+                last_err = Some(AttemptError::Request(e));
+                if attempt + 1 < opts.max_attempts {
+                    std::thread::sleep(opts.backoff_for(attempt));
+                }
+                continue;
+            }
+        };
+        let mut file = std::fs::File::create(tmp).map_err(|source| FetchError::Io {
+            path: tmp.to_path_buf(),
+            source,
+        })?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        let body_result = loop {
+            let count = match response.read(&mut buffer) {
+                Ok(0) => break Ok(()),
+                Ok(count) => count,
+                Err(error) => break Err(error),
+            };
+            file.write_all(&buffer[..count])
+                .map_err(|source| FetchError::Io {
+                    path: tmp.to_path_buf(),
+                    source,
+                })?;
+            hasher.update(&buffer[..count]);
+        };
+        match body_result {
+            Ok(()) => {
+                file.flush().map_err(|source| FetchError::Io {
+                    path: tmp.to_path_buf(),
+                    source,
+                })?;
+                let digest = hasher.finalize();
+                return Ok(digest.iter().map(|b| format!("{b:02x}")).collect());
+            }
+            Err(error) => {
+                last_err = Some(AttemptError::Body(error));
+                let _ = std::fs::remove_file(tmp);
+                if attempt + 1 < opts.max_attempts {
+                    std::thread::sleep(opts.backoff_for(attempt));
+                }
+            }
+        }
+    }
+    match last_err.expect("loop ran at least once") {
+        AttemptError::Request(source) => Err(FetchError::RequestFailed {
+            url: url.to_string(),
+            attempts: opts.max_attempts.max(1),
+            source,
+        }),
+        AttemptError::Body(source) => Err(FetchError::BodyReadFailed {
+            url: url.to_string(),
+            attempts: opts.max_attempts.max(1),
+            source,
+        }),
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::{Read, Write};
-    use std::net::{SocketAddr, TcpListener};
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-    use std::sync::Arc;
-
-    /// A tiny single-purpose HTTP/1.1 server: serves exactly `responses.len()`
-    /// connections, one canned (status, body) response each, `Connection:
-    /// close` after every response so the client always opens a fresh
-    /// connection per attempt (lines the server's accept() count up 1:1 with
-    /// the client's retry attempts).
-    struct TestServer {
-        addr: SocketAddr,
-        stop: Arc<AtomicBool>,
-        handle: Option<std::thread::JoinHandle<()>>,
-    }
-
-    impl TestServer {
-        /// A server that never receives the connections it expects must fail
-        /// fast, not hang the test (and, if this were ever the real bug
-        /// instead of a deliberate mutation, not hang the whole CI job). That
-        /// is `Drop`'s job: it signals `stop` and only then joins.
-        ///
-        /// It used to be a 5-second wall clock instead, which is a race rather
-        /// than a lifetime: the deadline began when the server started waiting,
-        /// not when the client did anything, so a loaded machine could burn it
-        /// before the request was sent. The thread then returned, dropped the
-        /// listener, and a pending connect was reset. Measured on Windows as an
-        /// intermittent ConnectionReset, the failing run taking 5.09s against
-        /// 0.1s clean, striking a different test almost every time and none of
-        /// them in isolation.
-        fn start(responses: Vec<(u16, Vec<u8>)>) -> TestServer {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let addr = listener.local_addr().unwrap();
-            listener.set_nonblocking(true).unwrap();
-            let stop = Arc::new(AtomicBool::new(false));
-            let thread_stop = Arc::clone(&stop);
-            let handle = std::thread::spawn(move || {
-                for (status, body) in responses {
-                    let mut stream = loop {
-                        if thread_stop.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        match listener.accept() {
-                            Ok((s, _)) => break s,
-                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                std::thread::sleep(Duration::from_millis(5));
-                            }
-                            Err(_) => return,
-                        }
-                    };
-                    // Windows hands back an accepted socket that INHERITED the
-                    // listener's non-blocking mode; Unix does not. The listener is
-                    // non-blocking only so accept() can poll a deadline, and
-                    // everything below assumes blocking: the read loop turns
-                    // WouldBlock into n == 0 and stops without reading the request,
-                    // and write_all can WouldBlock into a discarded error, so the
-                    // client sees a connection that closed without a response.
-                    stream.set_nonblocking(false).unwrap();
-                    stream
-                        .set_read_timeout(Some(Duration::from_secs(5)))
-                        .unwrap();
-                    let mut buf = [0u8; 4096];
-                    let mut seen = Vec::new();
-                    loop {
-                        let n = stream.read(&mut buf).unwrap_or(0);
-                        if n == 0 {
-                            break;
-                        }
-                        seen.extend_from_slice(&buf[..n]);
-                        if seen.windows(4).any(|w| w == b"\r\n\r\n") {
-                            break;
-                        }
-                    }
-                    let reason = if status == 200 { "OK" } else { "Error" };
-                    let head = format!(
-                        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        body.len()
-                    );
-                    // Surfaced, not discarded. A swallowed write error here reaches
-                    // the test as a confusing client-side "connection closed
-                    // without a response" instead of naming the side that failed.
-                    if let Err(e) = stream
-                        .write_all(head.as_bytes())
-                        .and_then(|()| stream.write_all(&body))
-                        .and_then(|()| stream.flush())
-                    {
-                        eprintln!("test server failed to write its response: {e}");
-                    }
-                }
-            });
-            TestServer {
-                addr,
-                stop,
-                handle: Some(handle),
-            }
-        }
-
-        fn url(&self) -> String {
-            format!("http://{}/asset", self.addr)
-        }
-    }
-
-    impl Drop for TestServer {
-        fn drop(&mut self) {
-            // Signal BEFORE joining, or a server still waiting for a connection
-            // nobody will make would hang the suite.
-            self.stop.store(true, Ordering::Relaxed);
-            if let Some(h) = self.handle.take() {
-                let _ = h.join();
-            }
-        }
-    }
-
-    fn temp_dest(name: &str) -> PathBuf {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "blockless-installer-fetch-test-{name}-{}-{n}",
-            std::process::id()
-        ));
-        dir.join("asset.bin")
-    }
-
-    fn fast_opts(max_attempts: u32) -> FetchOptions {
-        FetchOptions {
-            max_attempts,
-            backoff_base: Duration::from_millis(1),
-        }
-    }
-
-    #[test]
-    fn sha_mismatch_fails_loudly_and_writes_nothing() {
-        let body = b"correct bytes".to_vec();
-        let server = TestServer::start(vec![(200, body)]);
-        let client = reqwest::blocking::Client::new();
-        let dest = temp_dest("sha-mismatch");
-
-        let err = fetch_and_verify(
-            &client,
-            &server.url(),
-            "0000000000000000000000000000000000000000000000000000000000000000",
-            &dest,
-            &fast_opts(1),
-        )
-        .unwrap_err();
-
-        assert!(
-            matches!(err, FetchError::Sha256Mismatch { .. }),
-            "got {err:?}"
-        );
-        assert!(
-            !dest.exists(),
-            "a mismatched download must never reach the final path"
-        );
-    }
-
-    #[test]
-    fn retry_then_succeed() {
-        let body = b"eventually correct".to_vec();
-        let expected = sha256_hex(&body);
-        let server = TestServer::start(vec![(503, vec![]), (503, vec![]), (200, body.clone())]);
-        let client = reqwest::blocking::Client::new();
-        let dest = temp_dest("retry-then-succeed");
-
-        fetch_and_verify(&client, &server.url(), &expected, &dest, &fast_opts(3)).unwrap();
-
-        assert_eq!(std::fs::read(&dest).unwrap(), body);
-    }
-
-    #[test]
-    fn retry_exhausted_fails_loudly() {
-        let server = TestServer::start(vec![(503, vec![]), (503, vec![]), (503, vec![])]);
-        let client = reqwest::blocking::Client::new();
-        let dest = temp_dest("retry-exhausted");
-
-        let err = fetch_and_verify(
-            &client,
-            &server.url(),
-            "deadbeef00000000000000000000000000000000000000000000000000000000",
-            &dest,
-            &fast_opts(3),
-        )
-        .unwrap_err();
-
-        match err {
-            FetchError::RequestFailed { attempts, .. } => assert_eq!(attempts, 3),
-            other => panic!("expected RequestFailed, got {other:?}"),
-        }
-        assert!(!dest.exists());
-    }
-
-    #[test]
-    fn sha256_hex_matches_known_vector() {
-        // sha256("") -- a fixed, independently-verifiable vector, to catch a
-        // hasher/encoding mistake that a self-referential round-trip test
-        // (hash it, then compare to itself) could never catch.
-        assert_eq!(
-            sha256_hex(b""),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-    }
-
-    #[test]
-    fn backoff_doubles_each_attempt() {
-        let opts = FetchOptions {
-            max_attempts: 4,
-            backoff_base: Duration::from_millis(10),
-        };
-        assert_eq!(opts.backoff_for(0), Duration::from_millis(10));
-        assert_eq!(opts.backoff_for(1), Duration::from_millis(20));
-        assert_eq!(opts.backoff_for(2), Duration::from_millis(40));
-    }
-}
+#[path = "tests/fetch.rs"]
+mod tests;

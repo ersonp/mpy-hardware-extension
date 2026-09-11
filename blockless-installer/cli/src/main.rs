@@ -27,7 +27,7 @@ fn main() {
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod real_main {
-    use crate::cli::{Cli, Command};
+    use crate::cli::{resolve_vsix_path, Cli, Command};
     use blockless_installer_core::fetch::{download_client, FetchOptions};
     use blockless_installer_core::manifest::Manifest;
     use blockless_installer_core::platform::{Arch, Os, Paths, RawEnv};
@@ -167,6 +167,11 @@ mod real_main {
             ))
         });
         let manifest = Manifest::parse(&manifest_json).unwrap_or_else(|e| die(e));
+        let vsix_path = resolve_vsix_path(
+            cli.vsix.as_deref(),
+            &manifest_path,
+            &manifest.components.extension.path,
+        );
 
         let raw = RawEnv::from_process();
         let os = Os::detect(&raw).unwrap_or_else(|e| die(e));
@@ -194,7 +199,7 @@ mod real_main {
             fetch_opts: FetchOptions::default(),
             code_candidates,
             mac_install_targets: targets,
-            vsix_path: cli.vsix.clone(),
+            vsix_path: Some(vsix_path),
         };
 
         let env = SystemEnvironment;

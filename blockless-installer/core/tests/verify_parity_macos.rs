@@ -367,6 +367,12 @@ impl VscodeInstaller for ShellVscode {
     ) -> Result<(), blockless_installer_core::vscode::SignatureError> {
         unimplemented!()
     }
+    fn remove_unverified_install(
+        &self,
+        _app_dir: &Path,
+    ) -> Result<(), blockless_installer_core::vscode::InstallError> {
+        unimplemented!()
+    }
 }
 
 struct ShellExtensions;
