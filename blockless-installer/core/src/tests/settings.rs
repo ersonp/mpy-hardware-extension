@@ -15,8 +15,8 @@ fn temp_dir(name: &str) -> PathBuf {
 
 struct NoopCommandRunner;
 impl profile::CommandRunner for NoopCommandRunner {
-    fn running_vscode_pids(&self) -> Vec<u32> {
-        vec![]
+    fn running_vscode_pids(&self) -> Result<Vec<u32>, String> {
+        Ok(vec![])
     }
     fn spawn(&self, _code_cli: &Path, _args: &[&str]) -> std::io::Result<u32> {
         Ok(1)

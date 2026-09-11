@@ -228,6 +228,9 @@ mod real_main {
                     UninstallOutcome::VscodeRunning => {
                         println!("VS Code is running; quit it and re-run to uninstall. Nothing was removed.");
                     }
+                    UninstallOutcome::ProcessCheckFailed => {
+                        die("could not confirm VS Code is closed; nothing was removed.");
+                    }
                     UninstallOutcome::AbortedUnreadableState => {
                         die("state.json exists but is unreadable/incomplete; cannot determine what to remove. Nothing was removed.");
                     }

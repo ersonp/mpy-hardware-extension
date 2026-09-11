@@ -37,13 +37,15 @@ fn ps_quote(path: &Path) -> String {
 }
 
 impl CommandRunner for WindowsEnvironment {
-    fn running_vscode_pids(&self) -> Vec<u32> {
-        let Some(out) = stdout_of(&mut powershell(
+    fn running_vscode_pids(&self) -> Result<Vec<u32>, String> {
+        let out = stdout_of(&mut powershell(
             "(Get-Process -Name Code -ErrorAction SilentlyContinue).Id",
-        )) else {
-            return vec![];
-        };
-        out.lines().filter_map(|l| l.trim().parse().ok()).collect()
+        ))
+        .ok_or_else(|| "could not query running VS Code processes".to_string())?;
+        out.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| line.trim().parse().map_err(|e| format!("invalid PID: {e}")))
+            .collect()
     }
     fn spawn(&self, code_cli: &Path, args: &[&str]) -> std::io::Result<u32> {
         Command::new(code_cli).args(args).spawn().map(|c| c.id())

@@ -123,6 +123,9 @@ pub struct UninstallFlags {
 pub enum UninstallOutcome {
     /// VS Code is running: nothing was touched. Quit it and re-run.
     VscodeRunning,
+    /// The process check failed, so we cannot prove VS Code is closed.
+    /// Nothing was touched.
+    ProcessCheckFailed,
     /// `state.json` exists but is unreadable/unparseable/incomplete: nothing
     /// was touched. Fix it (or delete `BLK` manually) and re-run.
     AbortedUnreadableState,
@@ -167,8 +170,10 @@ pub fn uninstall(
 
     // A running VS Code owns storage.json in memory and would clobber our
     // edit; do nothing and ask the user to quit it and re-run.
-    if !command_runner.running_vscode_pids().is_empty() {
-        return UninstallOutcome::VscodeRunning;
+    match command_runner.running_vscode_pids() {
+        Ok(pids) if !pids.is_empty() => return UninstallOutcome::VscodeRunning,
+        Ok(_) => {}
+        Err(_) => return UninstallOutcome::ProcessCheckFailed,
     }
 
     let (profile_created_by_us, vscode_installed_by_us, profile_location) = match &state {
@@ -212,22 +217,11 @@ pub fn uninstall(
         profile_removed = true;
     }
 
-    let (blk_removed, blk_removal_partial) = if blk.exists() {
-        let attempted = runner.remove_dir_all(blk);
-        if attempted.is_ok() && !blk.exists() {
-            (true, false)
-        } else {
-            (false, true)
-        }
-    } else {
-        (true, false)
-    };
-
     let should_remove_vscode = !flags.keep_vscode && (flags.all || vscode_installed_by_us);
     // `true` only once every EXISTING candidate was actually removed -- a
     // partial removal (e.g. a locked file at one location) must not report
     // success, matching this function's existing honesty posture for BLK.
-    let vscode_removed = if should_remove_vscode {
+    let (vscode_removed, vscode_cleanup_complete) = if should_remove_vscode {
         let mut all_removed = true;
         let mut any_existed = false;
         for vscode_dir in vscode_dirs {
@@ -242,9 +236,33 @@ pub fn uninstall(
             };
             all_removed &= removed;
         }
-        any_existed && all_removed
+        (any_existed && all_removed, !any_existed || all_removed)
     } else {
-        false
+        (false, true)
+    };
+
+    // state.json is the only ownership journal for the VS Code install.
+    // Keep BLK intact when that uninstall is incomplete so a re-run still
+    // knows it owns, and may safely remove, the remaining installation.
+    if !vscode_cleanup_complete {
+        return UninstallOutcome::Finished {
+            profile_removed,
+            blk_removed: false,
+            blk_removal_partial: false,
+            vscode_removed,
+            invariant_guard_tripped: false,
+        };
+    }
+
+    let (blk_removed, blk_removal_partial) = if blk.exists() {
+        let attempted = runner.remove_dir_all(blk);
+        if attempted.is_ok() && !blk.exists() {
+            (true, false)
+        } else {
+            (false, true)
+        }
+    } else {
+        (true, false)
     };
 
     UninstallOutcome::Finished {

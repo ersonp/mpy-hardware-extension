@@ -48,7 +48,7 @@ pub trait CommandRunner {
     /// Re-checked immediately before every spawn (never cached from an
     /// earlier point) -- the user may have opened VS Code during a long
     /// prior download.
-    fn running_vscode_pids(&self) -> Vec<u32>;
+    fn running_vscode_pids(&self) -> Result<Vec<u32>, String>;
     /// Spawn `code_cli` with `args`, returning its PID.
     fn spawn(&self, code_cli: &Path, args: &[&str]) -> std::io::Result<u32>;
     /// Is this exact PID still alive?
@@ -127,7 +127,10 @@ pub fn register_profile_offline(
     if profile_registered(storage_path, profile_name) {
         return Ok(RegisterOfflineOutcome::AlreadyRegistered);
     }
-    if !runner.running_vscode_pids().is_empty() {
+    if runner
+        .running_vscode_pids()
+        .map_or(true, |pids| !pids.is_empty())
+    {
         return Ok(RegisterOfflineOutcome::SkippedVscodeRunning);
     }
 
@@ -236,7 +239,10 @@ pub fn register_profile(
     if profile_registered(storage_path, profile_name) {
         return RegisterProfileOutcome::AlreadyRegistered;
     }
-    let before = runner.running_vscode_pids();
+    let before = match runner.running_vscode_pids() {
+        Ok(pids) => pids,
+        Err(_) => return RegisterProfileOutcome::SpawnFailed,
+    };
     if runner
         .spawn(code_cli, &["--profile", profile_name, "--new-window"])
         .is_err()
@@ -254,9 +260,10 @@ pub fn register_profile(
     }
 
     if before.is_empty() {
-        let after = runner.running_vscode_pids();
-        for pid in after.into_iter().filter(|p| !before.contains(p)) {
-            stop_and_wait(runner, pid);
+        if let Ok(after) = runner.running_vscode_pids() {
+            for pid in after.into_iter().filter(|p| !before.contains(p)) {
+                stop_and_wait(runner, pid);
+            }
         }
     }
 

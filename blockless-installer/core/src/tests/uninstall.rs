@@ -47,8 +47,8 @@ struct FakeCommandRunner {
     running: Vec<u32>,
 }
 impl profile::CommandRunner for FakeCommandRunner {
-    fn running_vscode_pids(&self) -> Vec<u32> {
-        self.running.clone()
+    fn running_vscode_pids(&self) -> Result<Vec<u32>, String> {
+        Ok(self.running.clone())
     }
     fn spawn(&self, _code_cli: &Path, _args: &[&str]) -> std::io::Result<u32> {
         unimplemented!()
@@ -62,6 +62,22 @@ impl profile::CommandRunner for FakeCommandRunner {
 }
 fn not_running() -> FakeCommandRunner {
     FakeCommandRunner { running: vec![] }
+}
+
+struct FailedProcessCheck;
+impl profile::CommandRunner for FailedProcessCheck {
+    fn running_vscode_pids(&self) -> Result<Vec<u32>, String> {
+        Err("process query failed".to_string())
+    }
+    fn spawn(&self, _code_cli: &Path, _args: &[&str]) -> std::io::Result<u32> {
+        unimplemented!()
+    }
+    fn is_alive(&self, _pid: u32) -> bool {
+        unimplemented!()
+    }
+    fn request_graceful_close(&self, _pid: u32) {}
+    fn force_kill(&self, _pid: u32) {}
+    fn sleep(&self, _d: Duration) {}
 }
 
 #[derive(Default)]
@@ -338,6 +354,32 @@ fn vscode_running_touches_nothing() {
     assert!(l.blk.exists());
 }
 
+#[test]
+fn failed_process_check_touches_nothing() {
+    let l = layout("process-check-failed");
+    write_state(&l.state_path, &default_state());
+    write_storage_with_entry(&l.storage_path, "Blockless", "blockless");
+    let storage_before = std::fs::read(&l.storage_path).unwrap();
+    let runner = FakeUninstallRunner::default();
+
+    let outcome = uninstall(
+        &FailedProcessCheck,
+        &runner,
+        &l.state_path,
+        &l.storage_path,
+        &l.profiles_dir,
+        "Blockless",
+        &l.blk,
+        std::slice::from_ref(&l.vscode_dir),
+        &UninstallFlags::default(),
+    );
+
+    assert_eq!(outcome, UninstallOutcome::ProcessCheckFailed);
+    assert!(runner.remove_dir_calls.borrow().is_empty());
+    assert_eq!(std::fs::read(&l.storage_path).unwrap(), storage_before);
+    assert!(l.state_path.exists());
+}
+
 // --- ownership gating ---
 
 #[test]
@@ -479,6 +521,10 @@ fn a_locked_second_location_reports_vscode_removed_false_not_true() {
     }
     assert!(!apps.exists(), "the removable location is still removed");
     assert!(home_apps.exists(), "the locked location must survive");
+    assert!(
+        l.state_path.exists(),
+        "the ownership journal must survive until every VS Code location is removed"
+    );
 }
 
 #[test]

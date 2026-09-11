@@ -24,7 +24,9 @@ use blockless_installer_core::system::SystemEnvironment;
 #[test]
 #[ignore = "needs VS Code installed AND running; run explicitly on the acceptance rig"]
 fn real_running_vscode_is_detected() {
-    let pids = SystemEnvironment.running_vscode_pids();
+    let pids = SystemEnvironment
+        .running_vscode_pids()
+        .expect("the real VS Code process query must succeed");
     println!("running_vscode_pids() -> {pids:?}");
     assert!(
         !pids.is_empty(),
@@ -39,7 +41,9 @@ fn real_running_vscode_is_detected() {
 #[test]
 #[ignore = "needs VS Code CLOSED; the negative half, run explicitly on the rig"]
 fn no_vscode_running_is_reported_as_none() {
-    let pids = SystemEnvironment.running_vscode_pids();
+    let pids = SystemEnvironment
+        .running_vscode_pids()
+        .expect("the real VS Code process query must succeed");
     println!("running_vscode_pids() -> {pids:?}");
     assert!(
         pids.is_empty(),

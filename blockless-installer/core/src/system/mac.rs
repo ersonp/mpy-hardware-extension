@@ -40,24 +40,24 @@ impl CommandRunner for MacEnvironment {
     /// real VM: uninstall removed the profile with two windows open, and VS
     /// Code recreated it.
     ///
-    /// The helper processes are what this matches, and that is fine: they
-    /// exist only while VS Code does, which is precisely the question. Every
-    /// caller asks `is_empty()`, never for a specific pid.
-    ///
     /// No test here can see this. `CommandRunner` is mocked at all eight test
     /// sites, including the one that pins uninstall's refusal, so the trait
     /// that makes the logic testable is what left this unexercised.
-    fn running_vscode_pids(&self) -> Vec<u32> {
-        let Some(out) = Command::new("pgrep")
+    fn running_vscode_pids(&self) -> Result<Vec<u32>, String> {
+        let out = Command::new("pgrep")
             .args(["-f", "Visual Studio Code.app"])
             .output()
-            .ok()
-        else {
-            return vec![];
-        };
+            .map_err(|e| format!("could not run pgrep: {e}"))?;
+        if out.status.code() == Some(1) {
+            return Ok(Vec::new());
+        }
+        if !out.status.success() {
+            return Err(format!("pgrep failed with status {}", out.status));
+        }
         String::from_utf8_lossy(&out.stdout)
             .lines()
-            .filter_map(|l| l.trim().parse().ok())
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| line.trim().parse().map_err(|e| format!("invalid PID: {e}")))
             .collect()
     }
     fn spawn(&self, code_cli: &Path, args: &[&str]) -> std::io::Result<u32> {

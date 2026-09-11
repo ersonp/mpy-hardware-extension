@@ -59,8 +59,8 @@ impl FakeRunner {
 }
 
 impl CommandRunner for FakeRunner {
-    fn running_vscode_pids(&self) -> Vec<u32> {
-        self.running_pids.borrow().clone()
+    fn running_vscode_pids(&self) -> Result<Vec<u32>, String> {
+        Ok(self.running_pids.borrow().clone())
     }
     fn spawn(&self, _code_cli: &Path, _args: &[&str]) -> std::io::Result<u32> {
         match &self.spawn_result {
