@@ -3,7 +3,9 @@
 //! `system::SystemEnvironment` and is cfg-gated to macOS/Windows).
 
 use clap::{Parser, Subcommand};
-use std::path::{Path, PathBuf};
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+use std::path::Path;
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -24,6 +26,7 @@ pub struct Cli {
     pub command: Command,
 }
 
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 pub fn resolve_vsix_path(
     override_path: Option<&Path>,
     manifest_path: &Path,
