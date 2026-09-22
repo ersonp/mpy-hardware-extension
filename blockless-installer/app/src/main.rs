@@ -96,8 +96,49 @@ impl Drop for OpGuard<'_> {
     }
 }
 
-/// Refuse to start with a readable explanation when the WebView2 runtime is
-/// genuinely missing, instead of rendering a bare window titled `Error`.
+/// Wires `core::webview2`'s injected seams to the real machine.
+///
+/// Detection is `tauri::webview_version()` -- wry calls Microsoft's
+/// `GetAvailableCoreWebView2BrowserVersionString`, which reports on the actual
+/// runtime. It is NOT the EdgeUpdate registry key that Tauri's NSIS template
+/// reads; trusting that key is the bug this whole path replaces.
+#[cfg(windows)]
+struct RealWebview2Runner;
+
+#[cfg(windows)]
+impl blockless_installer_core::webview2::Webview2Runner for RealWebview2Runner {
+    fn runtime_available(&self) -> bool {
+        tauri::webview_version().is_ok()
+    }
+    fn download_bootstrapper(&self, dest: &std::path::Path) -> Result<(), String> {
+        let client =
+            blockless_installer_core::fetch::download_client().map_err(|e| e.to_string())?;
+        blockless_installer_core::fetch::download_unverified(
+            &client,
+            blockless_installer_core::webview2::BOOTSTRAPPER_URL,
+            dest,
+            &blockless_installer_core::fetch::FetchOptions::default(),
+        )
+        .map(|_sha| ())
+        .map_err(|e| e.to_string())
+    }
+    fn verify_signature(
+        &self,
+        artifact: &std::path::Path,
+    ) -> Result<(), blockless_installer_core::vscode::SignatureError> {
+        use blockless_installer_core::vscode::VscodeInstaller;
+        blockless_installer_core::system::SystemEnvironment.verify_signature(artifact)
+    }
+    fn run_bootstrapper(
+        &self,
+        exe: &std::path::Path,
+    ) -> Result<(), blockless_installer_core::vscode::InstallError> {
+        blockless_installer_core::system::SystemEnvironment.run_webview2_bootstrapper(exe)
+    }
+}
+
+/// Make sure the WebView2 runtime exists before a window is asked for,
+/// installing it with the user's consent when it does not.
 ///
 /// THE BUG THIS EXISTS FOR, found on the Windows Sandbox rig, 2026-09-21.
 /// `tauri.conf.json` asks NSIS to provision WebView2
@@ -121,7 +162,10 @@ impl Drop for OpGuard<'_> {
 /// `embedBootstrapper` and `offlineInstaller` are all nested INSIDE that same
 /// `${If} $4 == ""`, so the probe short-circuits every one. Embedding the
 /// runtime would not have helped; it would just have been skipped too. That
-/// is why the check has to live here.
+/// is why both the check AND the provisioning live here rather than in the
+/// bundle -- and why the NSIS bundle was dropped entirely: installing an
+/// installer bought nothing except that broken probe, an Add/Remove Programs
+/// entry, and a sidecar co-location contract.
 ///
 /// `tauri::webview_version()` is the right oracle because it does not consult
 /// the registry at all: wry calls Microsoft's own
@@ -129,43 +173,87 @@ impl Drop for OpGuard<'_> {
 /// actual runtime.
 #[cfg(windows)]
 fn preflight_webview2() {
-    let Err(e) = tauri::webview_version() else {
-        return;
-    };
+    use blockless_installer_core::webview2::{ensure_webview2, Webview2Outcome};
 
-    // A native message box, because there is no webview to draw a nicer one
-    // in -- that is the whole problem. Declared inline rather than pulling in
-    // a Win32 crate for a single call on a path that must not itself fail.
+    if tauri::webview_version().is_ok() {
+        return;
+    }
+
+    // Ask before downloading and running anything. Consent lives here rather
+    // than in `core::webview2` so that module stays UI-free and testable.
+    if !ask_yes_no(
+        "Blockless Installer needs the Microsoft Edge WebView2 runtime, and it is not \
+         installed on this PC.\n\n\
+         Install it now?\n\n\
+         It downloads about 2 MB from Microsoft, installs for your user account only, \
+         and does not need an administrator.",
+    ) {
+        std::process::exit(1);
+    }
+
+    let outcome = ensure_webview2(&RealWebview2Runner, &std::env::temp_dir());
+    match outcome {
+        Webview2Outcome::AlreadyPresent | Webview2Outcome::Installed => {}
+        Webview2Outcome::RanButStillMissing => {
+            message_box(
+                "The WebView2 installer ran but the runtime still is not available.\n\n\
+                 Install the Evergreen WebView2 Runtime manually, then run this installer \
+                 again:\nhttps://developer.microsoft.com/microsoft-edge/webview2/",
+            );
+            std::process::exit(1);
+        }
+        Webview2Outcome::Failed(why) => {
+            message_box(&format!(
+                "Blockless Installer could not install the Microsoft Edge WebView2 runtime.\n\n\
+                 {why}\n\n\
+                 Install it manually, then run this installer again:\n\
+                 https://developer.microsoft.com/microsoft-edge/webview2/"
+            ));
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Native dialogs, because on this path there is no webview to draw a nicer
+/// one in -- that is the whole problem being reported. Declared inline rather
+/// than pulling in a Win32 crate for two calls on a path that must not itself
+/// fail.
+#[cfg(windows)]
+mod nativedlg {
     extern "system" {
         fn MessageBoxW(hwnd: *mut u16, text: *const u16, caption: *const u16, u_type: u32) -> i32;
     }
     const MB_ICONERROR: u32 = 0x10;
+    const MB_ICONQUESTION: u32 = 0x20;
+    const MB_YESNO: u32 = 0x04;
+    const IDYES: i32 = 6;
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    let body = format!(
-        "Blockless Installer needs the Microsoft Edge WebView2 runtime, and it is not \
-         installed on this PC.\n\n\
-         Install the Evergreen WebView2 Runtime from Microsoft, then run this installer \
-         again:\n\
-         https://developer.microsoft.com/microsoft-edge/webview2/\n\n\
-         It installs for your user account only and does not need an administrator.\n\n\
-         Technical detail: {e}"
-    );
-    // SAFETY: both pointers are NUL-terminated UTF-16 buffers that outlive
-    // the call, and a null owner HWND is valid for an ownerless dialog.
-    unsafe {
-        MessageBoxW(
-            std::ptr::null_mut(),
-            wide(&body).as_ptr(),
-            wide("Blockless Installer").as_ptr(),
-            MB_ICONERROR,
-        );
+    fn show(body: &str, flags: u32) -> i32 {
+        let body = wide(body);
+        let caption = wide("Blockless Installer");
+        // SAFETY: both pointers are NUL-terminated UTF-16 buffers that outlive
+        // the call, and a null owner HWND is valid for an ownerless dialog.
+        unsafe { MessageBoxW(std::ptr::null_mut(), body.as_ptr(), caption.as_ptr(), flags) }
     }
-    std::process::exit(1);
+
+    pub(super) fn message_box(body: &str) {
+        let _ = show(body, MB_ICONERROR);
+    }
+
+    /// `false` on anything that is not an explicit Yes, so closing the dialog
+    /// with the X counts as "no" -- consent to download and run an executable
+    /// must be given, never merely not-refused.
+    pub(super) fn ask_yes_no(body: &str) -> bool {
+        show(body, MB_ICONQUESTION | MB_YESNO) == IDYES
+    }
 }
+
+#[cfg(windows)]
+use nativedlg::{ask_yes_no, message_box};
 
 #[cfg(not(windows))]
 fn preflight_webview2() {

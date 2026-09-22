@@ -172,6 +172,39 @@ pub fn fetch_and_verify(
     Ok(())
 }
 
+/// Download `url` to `dest` with retry but WITHOUT a sha256 check, returning
+/// the sha256 of whatever arrived so the caller can log it.
+///
+/// **Use this for exactly one thing: Microsoft's Evergreen WebView2
+/// bootstrapper.** Everything the manifest pins goes through
+/// [`fetch_and_verify`] and must keep doing so.
+///
+/// Why no hash: `go.microsoft.com/fwlink/p/?LinkId=2124703` is a redirector
+/// that always serves the current bootstrapper, so there is no stable digest
+/// to pin, and inventing one would mean writing a hash we cannot fetch
+/// authoritatively -- precisely what the rig documentation forbids. Integrity
+/// is instead established by the artifact's AUTHENTICODE SIGNATURE, checked
+/// before it is executed, by the same `verify_signature` gate the VS Code
+/// installer already passes through (Microsoft subject pin included). That is
+/// a stronger claim than a hash pinned in our own repo: it chains to
+/// Microsoft rather than to us.
+///
+/// The returned digest is for the log only. It is NOT a gate, and a caller
+/// that treats it as one has misunderstood this function.
+pub fn download_unverified(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    dest: &Path,
+    opts: &FetchOptions,
+) -> Result<String, FetchError> {
+    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|source| FetchError::Io {
+        path: parent.to_path_buf(),
+        source,
+    })?;
+    fetch_with_retry(client, url, dest, opts)
+}
+
 /// GET `url` and return the body as text, retried under the SAME policy as
 /// [`fetch_and_verify`]'s downloads (`FetchOptions::max_attempts`, exponential
 /// backoff from `backoff_base`).

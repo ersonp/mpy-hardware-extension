@@ -13,3 +13,7 @@ pub mod system;
 pub mod uninstall;
 pub mod verify;
 pub mod vscode;
+/// Windows-only: the GUI's own WebView2 runtime. Gated because macOS uses
+/// in-box WKWebView and has nothing to provision.
+#[cfg(windows)]
+pub mod webview2;

@@ -39,6 +39,31 @@ fn quiet_command<S: AsRef<OsStr>>(program: S) -> Command {
     cmd
 }
 
+impl WindowsEnvironment {
+    /// Run Microsoft's Evergreen WebView2 bootstrapper.
+    ///
+    /// `/silent /install` is the bootstrapper's OWN argument grammar and is
+    /// not interchangeable with the Inno Setup flags
+    /// [`VscodeInstaller::run_silent_installer`] passes to VS Code
+    /// (`/VERYSILENT /NORESTART ...`). Passing those here would leave the
+    /// bootstrapper showing UI, or refusing to run, which on the pre-flight
+    /// path means a stuck window with no webview to explain itself -- hence a
+    /// method of its own rather than reuse.
+    ///
+    /// Run non-elevated it installs PER USER, which is what keeps the
+    /// "no administrator" claim true.
+    pub fn run_webview2_bootstrapper(&self, exe: &Path) -> Result<(), InstallError> {
+        if run_ok(quiet_command(exe).args(["/silent", "/install"])) {
+            Ok(())
+        } else {
+            Err(InstallError(format!(
+                "{} /silent /install failed",
+                exe.display()
+            )))
+        }
+    }
+}
+
 fn run_ok(cmd: &mut Command) -> bool {
     cmd.status().map(|s| s.success()).unwrap_or(false)
 }
