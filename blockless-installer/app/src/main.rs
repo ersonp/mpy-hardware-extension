@@ -207,7 +207,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::run_install,
             commands::run_uninstall,
-            commands::save_diagnostics
+            commands::save_diagnostics,
+            commands::extension_version
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

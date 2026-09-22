@@ -245,3 +245,21 @@ document
   .addEventListener("click", () =>
     saveDiagnostics("ready-diagnostics-btn", "ready-diagnostics-error"),
   );
+
+// The extension version this installer will install, shown on the ready
+// screen. The installer's own version (the one in the setup filename and in
+// Add/Remove Programs) is deliberately NOT the extension's: the two ship on
+// separate cadences. This surfaces the number a user actually asks about.
+//
+// Failure is silent on purpose. A missing sidecar manifest is already
+// reported loudly by the first Install click, naming every path it searched;
+// a second complaint at startup would be noise, and an empty span reads as
+// "no version mentioned" rather than "something is broken".
+(async () => {
+  try {
+    const v = await invoke("extension_version");
+    if (v) document.getElementById("ext-version").textContent = ` (${v})`;
+  } catch {
+    /* leave it blank */
+  }
+})();
