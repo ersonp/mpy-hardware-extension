@@ -17,3 +17,12 @@ pub mod vscode;
 /// in-box WKWebView and has nothing to provision.
 #[cfg(windows)]
 pub mod webview2;
+
+/// This crate's version, for shells that must not drift from it.
+///
+/// `app/` is a separate cargo workspace (see `../Cargo.toml`'s `exclude`), so
+/// its `Cargo.toml` carries its own literal `version` and CANNOT inherit
+/// `[workspace.package]`. That is one more hand-maintained copy of the same
+/// number, alongside the manifest's `installerVersion`. Exported so the GUI
+/// can assert equality in a test rather than relying on someone noticing.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");

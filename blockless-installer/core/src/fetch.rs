@@ -243,6 +243,21 @@ pub fn get_text_with_retry(
             Ok(body) => return Ok(body),
             Err(e) => {
                 let client_error = e.status().is_some_and(|s| s.is_client_error());
+                // Logged per failed attempt, so a retry that SUCCEEDS still
+                // leaves evidence it happened. `logs/installer.log` ships in
+                // every diagnostics bundle, which is the only durable artefact
+                // a rig run (or a user's bug report) can cite: without this
+                // line, a transient that the retry silently absorbed is
+                // indistinguishable from one that never occurred, and an
+                // induced-fault run would prove nothing readable.
+                tracing::warn!(
+                    url,
+                    attempt = attempt + 1,
+                    of = attempts,
+                    will_retry = !client_error && attempt + 1 < attempts,
+                    error = %e,
+                    "GET failed"
+                );
                 last = Some(e);
                 if client_error {
                     break;

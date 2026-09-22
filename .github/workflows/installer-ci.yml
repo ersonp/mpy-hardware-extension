@@ -140,6 +140,17 @@ jobs:
       - name: app crate -- cargo test
         run: cargo test --manifest-path app/Cargo.toml
 
+      # Compile-only for Intel Macs. `cargo tauri build` on an Apple Silicon
+      # machine WITHOUT --target universal-apple-darwin produces an arm64-only
+      # .app that will not launch on an Intel Mac at all -- a far bigger
+      # problem than any uv pin, and nothing currently records which form is
+      # built. This does not fix that (it is a packaging decision); it just
+      # stops the x86_64 target silently rotting in the meantime.
+      - name: intel mac target still compiles
+        run: |
+          rustup target add x86_64-apple-darwin
+          cargo check --workspace --target x86_64-apple-darwin
+
   windows:
     name: installer core + gui (windows)
     runs-on: windows-latest
@@ -179,3 +190,21 @@ jobs:
         run: cargo clippy --manifest-path app/Cargo.toml --all-targets -- -D warnings
       - name: app crate -- cargo test
         run: cargo test --manifest-path app/Cargo.toml
+      # The debug profile cannot see two properties of the binary that ships.
+      # `windows_subsystem` is scoped to `not(debug_assertions)`, so a debug
+      # build is legitimately a console binary and
+      # app/tests/windows_subsystem.rs asserts nothing there; and the CRT
+      # image scan in windows_crt_static.rs runs against the debug exe, not
+      # the shipped one. Both defects those tests guard against were found by
+      # a human looking at a Sandbox screenshot rather than by CI -- without
+      # this step, that stays true.
+      - name: app crate -- cargo test (release, the profile that ships)
+        run: cargo test --release --manifest-path app/Cargo.toml
+      # Compile-only, no arm64 runner needed: catches a cfg or import mistake
+      # that breaks the ARM64 Windows target without waiting for someone to
+      # have the hardware. This proves it COMPILES and nothing more -- see
+      # scripts/NOTES.md for what the arch coverage table actually claims.
+      - name: arm64 windows target still compiles
+        run: |
+          rustup target add aarch64-pc-windows-msvc
+          cargo check --workspace --target aarch64-pc-windows-msvc
