@@ -18,8 +18,8 @@
 //! 2026-09-21: the bundle "installed" in 1.1s and the app opened a bare window
 //! titled `Error`.
 //!
-//! Three of the four `webviewInstallMode` values are nested inside that
-//! `${If}` and are therefore all skipped together. The exception is
+//! Of the five `webviewInstallMode` values, three are nested inside that
+//! `${If}` and are therefore skipped together. The interesting exception is
 //! `fixedRuntime`, which ships a runtime alongside the app and never consults
 //! the probe at all -- a real alternative, at roughly 180 MB of shipped
 //! bundle, and the one ARCHITECTURE.md previously recorded as the fallback for
@@ -83,7 +83,9 @@ pub trait Webview2Runner {
     fn download_bootstrapper(&self, dest: &Path) -> Result<(), String>;
     /// Authenticode-verify a downloaded artifact, pinned to Microsoft.
     fn verify_signature(&self, artifact: &Path) -> Result<(), SignatureError>;
-    /// Run the bootstrapper so it installs PER USER and without a prompt.
+    /// Run the bootstrapper without a prompt. Documented to install per-user
+    /// when run non-elevated -- not demonstrated here; see
+    /// `system/windows.rs::run_webview2_bootstrapper`.
     fn run_bootstrapper(&self, exe: &Path) -> Result<(), InstallError>;
 }
 

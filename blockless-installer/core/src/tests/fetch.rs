@@ -691,3 +691,56 @@ fn get_text_surfaces_a_connection_failure_as_a_transport_error() {
     );
     assert!(err.is_connect() || err.is_request(), "got {err:?}");
 }
+
+/// A peer that accepts the connection, sends headers, and then goes silent
+/// must fail the attempt rather than blocking forever.
+///
+/// Found by review on PR #97, after the retry was added: `get_text_with_retry`
+/// accepted `FetchOptions` and never applied `read_timeout`, while
+/// `download_client` sets `.timeout(None)` deliberately so a 542 MB transfer
+/// is not capped. The attempt therefore had no bound at all, and a retry that
+/// cannot end an attempt cannot retry -- the installer's worker would have sat
+/// on the VS Code update API forever with the GUI showing a step in progress,
+/// and `prevent_close` stops the user closing the window while an op runs.
+/// `tcp_keepalive` does not catch this: the peer keeps ACKing.
+///
+/// ON ITS OWN THREAD, bounded by `recv_timeout`, for the same reason
+/// `stalled_but_alive_connection_errors_instead_of_hanging` above does it:
+/// WITHOUT the fix this call never returns, so a plain assertion could not
+/// fail -- it would hang the suite until the CI job's own timeout killed it,
+/// with no failing test name in the output. Removing the timeout must fail
+/// THIS test, not the job.
+///
+/// `max_attempts: 1` because the stalling server serves exactly one
+/// connection; the point here is that the attempt TERMINATES.
+#[test]
+fn get_text_bounds_an_attempt_against_a_stalling_peer() {
+    let read_timeout = Duration::from_millis(300);
+    let server = TestServer::start_stalling_after_headers(200);
+    let url = server.url();
+    let opts = FetchOptions {
+        max_attempts: 1,
+        backoff_base: Duration::from_millis(1),
+        read_timeout,
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        // Exactly what `download_client` builds: no total timeout, so the only
+        // bound is the per-request one under test.
+        let client = reqwest::blocking::Client::builder()
+            .timeout(None)
+            .build()
+            .unwrap();
+        let _ = tx.send(get_text_with_retry(&client, &url, &opts));
+    });
+
+    let result = rx.recv_timeout(read_timeout * 20).expect(
+        "a stalled peer must end the attempt within roughly read_timeout;          hanging here means the per-request timeout is gone",
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.is_timeout(),
+        "a stalled peer must surface as a timeout, got {err}"
+    );
+}

@@ -103,6 +103,13 @@ pub enum FetchError {
 /// `read_timeout` bounds the gap between body reads within a single
 /// attempt (see [`READ_TIMEOUT`]); it is unrelated to `max_attempts` and
 /// `backoff_base`, which govern retrying a failed attempt.
+///
+/// TWO MEANINGS, deliberately, and worth knowing before you tune it:
+/// [`fetch_and_verify`] uses it as an IDLE bound (the gap between chunks of a
+/// large streaming body), while [`get_text_with_retry`] uses it as a TOTAL
+/// per-request deadline for one small JSON document. Lowering it to tighten
+/// stall detection on downloads therefore also caps the update-API request
+/// outright. Split this field before that difference matters.
 #[derive(Debug, Clone)]
 pub struct FetchOptions {
     pub max_attempts: u32,
@@ -222,9 +229,17 @@ pub fn download_unverified(
 /// on, so the request that gates the whole install must be at least as robust
 /// as the download that follows it.
 ///
-/// No watchdog thread here, unlike [`retry::fetch_with_retry`]: that exists to
-/// bound a stalled multi-hundred-megabyte streaming body, and this reads a
-/// small JSON document. The client's own timeouts cover it.
+/// Each attempt is bounded by `opts.read_timeout` as a TOTAL per-request
+/// deadline, not by the idle watchdog [`retry::fetch_with_retry`] uses. Note
+/// the client's own timeouts do NOT cover this: `download_client` sets
+/// `.timeout(None)` so a 542 MB transfer is never capped, which is why the
+/// bound has to be applied per request here.
+///
+/// A total bound is the stronger choice for this call. The watchdog is
+/// idle-based, so a peer trickling one byte per window defeats it; an absolute
+/// deadline does not care. That trade only works because this reads one small
+/// JSON document -- applying it to a download would cap the transfer, which is
+/// exactly what `download_client` refuses to do.
 ///
 /// **A 4xx is never retried.** A client error is a fact about the request, not
 /// a transient, and retrying it would just burn the whole backoff budget
@@ -240,6 +255,22 @@ pub fn get_text_with_retry(
     for attempt in 0..attempts {
         match client
             .get(url)
+            // BOUND THE ATTEMPT. `download_client` sets `.timeout(None)` on
+            // purpose -- a 542 MB transfer must not be capped -- so without a
+            // per-request timeout here an attempt can never end, and a retry
+            // that can never fire is not a retry. `tcp_keepalive` does not
+            // help: it detects a peer that stops ACKing, not one that ACKs and
+            // sends nothing (see this module's docs). A server that accepts
+            // the connection and then stalls mid-headers would block the
+            // installer's worker thread forever, with the GUI showing a step
+            // that never completes.
+            //
+            // `RequestBuilder::timeout` overrides the client's for this
+            // request only, so the download path is untouched. A total bound
+            // is right here where `fetch_with_retry` uses an idle watchdog,
+            // because this reads one small JSON document rather than
+            // streaming hundreds of megabytes.
+            .timeout(opts.read_timeout)
             .send()
             .and_then(|r| r.error_for_status())
             .and_then(|r| r.text())
@@ -253,16 +284,21 @@ pub fn get_text_with_retry(
                 // occurred, and an induced-fault rig run would prove nothing
                 // readable.
                 //
-                // WHERE IT LANDS, and where it does not. The GUI's writer
-                // (`app/src/logging.rs`) never creates `BLK/logs` -- only
-                // `run_install` does, deliberately, because recreating it at
-                // startup would put `BLK` back on a machine a prior uninstall
-                // had cleaned. So this reaches `logs/installer.log`, and hence
-                // the diagnostics bundle, for fetches made DURING an operation
-                // (the VS Code update API included). A fetch made before any
-                // operation -- the WebView2 bootstrapper download in the GUI's
-                // pre-flight -- has nowhere to write yet and is dropped; that
-                // path reports through its own dialog instead.
+                // WHERE IT LANDS. This line is emitted only by
+                // `get_text_with_retry`, so in practice it covers the VS Code
+                // update API. The download path (`fetch_with_retry`, in
+                // `retry.rs`) emits no tracing at all, so the WebView2
+                // bootstrapper fetch never reaches here regardless of where
+                // logs are writable -- that path reports through its own
+                // dialog.
+                //
+                // It reaches `logs/installer.log`, and hence the diagnostics
+                // bundle, whenever `BLK/logs` exists. The GUI's writer
+                // (`app/src/logging.rs`) never creates it -- only `run_install`
+                // does, deliberately, because recreating it at startup would
+                // put `BLK` back on a machine a prior uninstall had cleaned --
+                // so on a fresh or freshly-cleaned machine, lines emitted
+                // before the first install are dropped.
                 tracing::warn!(
                     url,
                     attempt = attempt + 1,

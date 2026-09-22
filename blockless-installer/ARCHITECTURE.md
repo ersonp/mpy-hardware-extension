@@ -198,16 +198,17 @@ elevation, it fails with guidance rather than prompting for admin.
 **WebView2 (GUI installer, Windows).** A fresh machine must be assumed to have no WebView2 runtime
 at all. The GUI ships as an NSIS bundle in per-user mode (`installMode: "currentUser"`), with
 `webviewInstallMode: { "type": "downloadBootstrapper", "silent": true }`. Microsoft's Evergreen
-bootstrapper installs per-user when it is itself run non-elevated, so "no admin, ever" holds
-through the WebView2 install too.
+bootstrapper is documented to install per-user when run non-elevated. See the caveat at the end of
+this section: that has not been demonstrated here.
 
 **The bundle alone is not sufficient, and the app does not rely on it.** Tauri's NSIS template
 decides whether to provision by reading
 `HKLM\...\EdgeUpdate\Clients\{F3017226-...}\pv`. Microsoft Edge registers that same client GUID,
 so on a machine carrying the registration WITHOUT the runtime installed -- a stock Windows Sandbox
 image, and anything like it -- the bundle provisions nothing and the app would open a bare window
-titled `Error`. Found on the rig, 2026-09-21. Three of the four `webviewInstallMode` values -- `downloadBootstrapper`,
-`embedBootstrapper` and `offlineInstaller` -- sit inside that same `${If}` and are skipped together.
+titled `Error`. Found on the rig, 2026-09-21. Of the five `webviewInstallMode` values, three -- `downloadBootstrapper`, `embedBootstrapper` and
+`offlineInstaller` -- sit inside that same `${If}` and are skipped together (`Skip` does nothing by
+definition).
 The exception is `fixedRuntime`, which ships a runtime alongside the app and never consults the
 probe; at roughly 180 MB of shipped bundle it remains a real alternative to the app-side check
 below, and is what this document previously recorded as the fallback for exactly this failure.
@@ -216,7 +217,8 @@ So the app provisions the runtime itself as well (`core/src/webview2.rs`), and t
 authoritative path. Detection is Microsoft's `GetAvailableCoreWebView2BrowserVersionString`, reached
 via `tauri::webview_version()`, never the registry key. When the runtime is missing the app asks for
 consent, downloads the Evergreen bootstrapper and runs it `/silent /install` (per-user, non-elevated),
-then re-checks availability rather than trusting the installer's exit code.
+then re-checks availability rather than trusting the installer's exit code. (Run non-elevated it is
+documented to install per-user; again, see the caveat below.)
 
 The bootstrapper is fetched WITHOUT a sha256 pin, deliberately: its URL is a redirector that always
 serves the current build, so no stable digest exists to pin. Integrity comes from its Authenticode

@@ -170,7 +170,7 @@ impl blockless_installer_core::webview2::Webview2Runner for RealWebview2Runner {
 /// portable build with no bundle was tried and reverted -- `d783c91` -- because
 /// nothing then points at the uninstaller.)
 ///
-/// `fixedRuntime` is the one `webviewInstallMode` that would also avoid the
+/// `fixedRuntime` is the one other `webviewInstallMode` that would avoid the
 /// probe, by shipping a runtime alongside the app at roughly 180 MB. It
 /// remains a live alternative to this module, not a discarded one.
 ///

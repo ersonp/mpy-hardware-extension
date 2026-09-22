@@ -141,8 +141,16 @@ jobs:
         run: cargo test --manifest-path app/Cargo.toml
 
       # Compile-only for Intel Macs, core + cli ONLY -- `app/` is excluded from
-      # this workspace and is not covered (same limitation as the arm64 step on
-      # the windows job).
+      # this workspace and is not covered here.
+      #
+      # That is a gap, not a proven impossibility. The reason `app/` is skipped
+      # on the WINDOWS job was measured there (cross-compiling it for
+      # aarch64-pc-windows-msvc fails, "failed to find tool clang"); nothing
+      # equivalent has been measured on macOS, where Apple clang targets
+      # x86_64 natively. Adding
+      # `cargo check --manifest-path app/Cargo.toml --target x86_64-apple-darwin`
+      # here is very likely to work and would close the GUI half of the gap.
+      # Untried, so not enabled blind.
       #
       # This does NOT address the real question, which is a packaging decision
       # nobody has recorded: `cargo tauri build` on an Apple Silicon machine
@@ -211,10 +219,12 @@ jobs:
       # have the hardware.
       #
       # SCOPE, precisely: core + cli ONLY. `app/` is excluded from this
-      # workspace (see ../Cargo.toml) and is NOT covered here -- cross-checking
-      # it needs a C toolchain for the target (`cc-rs` fails with "failed to
-      # find tool clang", measured locally 2026-09-22), which this job does not
-      # have. So the GUI crate remains uncompiled for arm64 anywhere.
+      # workspace (see ../Cargo.toml) and is NOT covered here: cross-checking it
+      # for this target fails in `cc-rs` with "failed to find tool clang",
+      # measured on a developer machine 2026-09-22. Whether `windows-latest`
+      # would fare better is UNVERIFIED -- that image may well ship LLVM -- so
+      # this is a gap worth revisiting, not a closed door. As it stands the GUI
+      # crate is compiled for arm64 nowhere.
       #
       # And this proves compilation, nothing more. scripts/NOTES.md holds what
       # the arch coverage table actually claims.
