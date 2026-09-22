@@ -665,10 +665,15 @@ fn get_text_honours_max_attempts_of_one() {
     assert_eq!(server.hits(), 1, "one attempt means one");
 }
 
-/// Transport failures retry too, not just HTTP statuses: nothing is listening,
-/// so every attempt fails to connect and the error is NOT a status.
+/// A connect failure surfaces as a transport error, not an HTTP status.
+///
+/// NOT a retry test, despite what its first name claimed: nothing is
+/// listening, so there is no server to count attempts and the assertion below
+/// would pass even if connect errors were never retried. Retry behaviour is
+/// covered by the three tests above, which can count. Named for what it
+/// actually checks.
 #[test]
-fn get_text_retries_a_connection_failure() {
+fn get_text_surfaces_a_connection_failure_as_a_transport_error() {
     // Bind to claim a port, then drop the listener so the port is free and
     // connections are refused. Deterministic, and needs no server thread.
     let addr = {

@@ -29,10 +29,18 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// window flashing up on the user's desktop. The two fixes belong together --
 /// the first one alone trades a persistent console for intermittent ones.
 ///
-/// Safe for the CLI too, which links as a console binary: a console child
-/// there had a console to inherit and never opened a window of its own, and
-/// stdio handles are passed explicitly by `Command` regardless, so captured
-/// output (`stdout_of`) and inherited output (`run_ok`) both behave as before.
+/// For the CLI, which links as a console binary, OUTPUT is unaffected: a
+/// console child there never opened a window of its own, and `Command` passes
+/// stdio handles explicitly, so `stdout_of` (piped) and `run_ok` (inherited)
+/// both read as before.
+///
+/// One thing does change, and it is not nothing. `CREATE_NO_WINDOW` detaches
+/// the child from the parent's console, so a Ctrl+C or Ctrl+Break typed at the
+/// CLI no longer reaches these children -- `unins000.exe`, the VS Code
+/// installer, `uv`, PowerShell. Interrupting a long install from the terminal
+/// now kills the CLI and leaves the child running. Untested; accepted because
+/// the alternative is a console window flashing on every spawn for the GUI,
+/// which is the product users actually run.
 fn quiet_command<S: AsRef<OsStr>>(program: S) -> Command {
     let mut cmd = Command::new(program);
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -50,8 +58,12 @@ impl WindowsEnvironment {
     /// path means a stuck window with no webview to explain itself -- hence a
     /// method of its own rather than reuse.
     ///
-    /// Run non-elevated it installs PER USER, which is what keeps the
-    /// "no administrator" claim true.
+    /// Microsoft documents that run non-elevated this installs PER USER, which
+    /// is what the "no administrator" claim rests on. NOT demonstrated here:
+    /// every rig run executed as Administrator (Windows Sandbox does so by
+    /// default and it cannot be changed) and the resulting registration landed
+    /// under HKLM, i.e. per-machine. Microsoft also notes a per-user install is
+    /// replaced by a per-machine one where a per-machine Edge Updater exists.
     pub fn run_webview2_bootstrapper(&self, exe: &Path) -> Result<(), InstallError> {
         if run_ok(quiet_command(exe).args(["/silent", "/install"])) {
             Ok(())

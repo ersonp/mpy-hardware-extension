@@ -42,16 +42,28 @@ pub trait UninstallRunner {
     /// How long to keep re-checking that a removed directory has actually
     /// disappeared before concluding the removal failed.
     ///
-    /// Windows keeps a directory entry visible until the last handle to
-    /// anything inside it closes ("delete-pending"), so a tree that WAS
-    /// deleted can still answer `exists() == true` for a moment afterwards.
-    /// Checking once, immediately, reported a failed uninstall on EVERY first
-    /// attempt: found on the Windows Sandbox rig, 2026-09-22, where the same
-    /// snapshot that carried "VS Code could not be fully removed" also showed
-    /// the directory gone. A second uninstall then succeeded with nothing else
-    /// changed. That false failure is not cosmetic -- it trips the
+    /// WHAT WAS OBSERVED, on the Windows Sandbox rig 2026-09-22: checking once,
+    /// immediately, reported a failed uninstall on EVERY first attempt. The
+    /// same snapshot that carried "VS Code could not be fully removed" also
+    /// showed the directory gone, and a second uninstall then succeeded with
+    /// nothing else changed. That false failure is not cosmetic -- it trips the
     /// `!vscode_cleanup_complete` bail-out below, so BLK is left on disk and
     /// the rest of the uninstall never runs.
+    ///
+    /// WHY, less certainly. Two mechanisms both fit, and the rig did not
+    /// distinguish them:
+    /// - Windows keeps a directory entry visible until the last handle to
+    ///   anything inside it closes ("delete-pending"), so a tree that WAS
+    ///   deleted can still answer `exists() == true` briefly.
+    /// - Inno Setup's uninstaller is two-phase: `unins000.exe` (what
+    ///   `run_vscode_uninstaller` waits on) exits when the second phase signals
+    ///   it, and that second phase THEN deletes the directory. On this reading
+    ///   the call returns before removal by design, with no handle race at all.
+    ///
+    /// Waiting fixes both, which is why this is written as a wait rather than
+    /// as a claim about which one it is. The 10s default is a guess with
+    /// headroom, not a measurement: the rig sampled every 30s and never
+    /// bracketed the actual interval.
     ///
     /// Zero means check once and never sleep; the test runners return that, so
     /// the suite stays fast while production gets real tolerance.
@@ -67,11 +79,11 @@ pub trait UninstallRunner {
 /// costs nothing. Only a genuinely surviving directory pays the full wait,
 /// and that one deserves to.
 ///
-/// This is the same delete-pending phenomenon the rig documentation warns
-/// observers about -- "sampling 'is it gone?' immediately after uninstall
-/// returns is not a measurement". It applies just as much to the code doing
-/// the removing, where being fooled changes behaviour rather than merely
-/// misleading a reader.
+/// The rig documentation warns observers that "sampling 'is it gone?'
+/// immediately after uninstall returns is not a measurement". The same applies
+/// to the code doing the removing, where being fooled changes behaviour rather
+/// than merely misleading a reader -- whichever of the two mechanisms in
+/// [`UninstallRunner::removal_settle_timeout`] is responsible.
 fn removal_settled(runner: &dyn UninstallRunner, path: &Path) -> bool {
     if !path.exists() {
         return true;
@@ -311,7 +323,18 @@ pub fn uninstall(
         // Mirrors the scripts exactly: for an unsafe location, presence is
         // never even checked (there is nothing we attempted to remove at an
         // untrusted path), so it never blocks the guard on its own.
-        let dir_still_present = loc_safe && profiles_dir.join(&profile_location).exists();
+        //
+        // `removal_settled`, not a bare `exists()`, for the same reason the VS
+        // Code and BLK removals use it: a directory removed moments ago can
+        // still answer `exists() == true`. This path matters MORE than those
+        // two, not less -- a false positive here trips the invariant guard,
+        // which abandons the whole uninstall rather than just one step, and
+        // leaves the journal claiming the profile is still ours.
+        //
+        // Missed in the first pass at this defect, which patched the other two
+        // call sites and left the most severe one alone.
+        let dir_still_present =
+            loc_safe && !removal_settled(runner, &profiles_dir.join(&profile_location));
 
         if !entry_gone || dir_still_present {
             return UninstallOutcome::Finished {

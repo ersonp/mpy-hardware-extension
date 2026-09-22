@@ -211,9 +211,13 @@ pub fn download_unverified(
 ///
 /// Exists because the VS Code update-API request was a single unretried
 /// `client.get(url).send()` in `vscode.rs`, while the download it gates got
-/// the full retry treatment. Found on the Windows Sandbox rig, 2026-09-21:
-/// one transient DNS/NAT blip on a freshly booted machine surfaced to the user
-/// as a first-run failure screen, and a manual retry cleared it. A cold
+/// the full retry treatment. Found on the Windows Sandbox rig, 2026-09-21: a
+/// first Install surfaced "could not reach the VS Code update API" as a
+/// failure screen and a manual retry cleared it, with nothing else changed.
+/// The cause was not captured -- a freshly booted sandbox whose NAT/DNS had
+/// not settled is the likeliest explanation, not a confirmed one -- but a
+/// single-shot request on the path that gates the whole install is worth
+/// retrying whatever the cause was. A cold
 /// machine with slow DHCP is exactly the profile a one-click installer runs
 /// on, so the request that gates the whole install must be at least as robust
 /// as the download that follows it.
@@ -244,12 +248,21 @@ pub fn get_text_with_retry(
             Err(e) => {
                 let client_error = e.status().is_some_and(|s| s.is_client_error());
                 // Logged per failed attempt, so a retry that SUCCEEDS still
-                // leaves evidence it happened. `logs/installer.log` ships in
-                // every diagnostics bundle, which is the only durable artefact
-                // a rig run (or a user's bug report) can cite: without this
-                // line, a transient that the retry silently absorbed is
-                // indistinguishable from one that never occurred, and an
-                // induced-fault run would prove nothing readable.
+                // leaves evidence it happened: without this line a transient
+                // the retry absorbed is indistinguishable from one that never
+                // occurred, and an induced-fault rig run would prove nothing
+                // readable.
+                //
+                // WHERE IT LANDS, and where it does not. The GUI's writer
+                // (`app/src/logging.rs`) never creates `BLK/logs` -- only
+                // `run_install` does, deliberately, because recreating it at
+                // startup would put `BLK` back on a machine a prior uninstall
+                // had cleaned. So this reaches `logs/installer.log`, and hence
+                // the diagnostics bundle, for fetches made DURING an operation
+                // (the VS Code update API included). A fetch made before any
+                // operation -- the WebView2 bootstrapper download in the GUI's
+                // pre-flight -- has nowhere to write yet and is dropped; that
+                // path reports through its own dialog instead.
                 tracing::warn!(
                     url,
                     attempt = attempt + 1,

@@ -1,13 +1,14 @@
 //! Provisioning the WebView2 runtime the GUI needs on Windows.
 //!
-//! WHY THIS EXISTS AT ALL. The GUI used to ship as an NSIS bundle whose only
-//! real job was installing this runtime, and it did that job by reading a
-//! registry string:
+//! WHY THIS EXISTS. The GUI ships as an NSIS bundle, and that bundle is
+//! configured to provision this runtime
+//! (`webviewInstallMode: downloadBootstrapper`). It cannot be relied on to do
+//! so. Tauri's NSIS template decides by reading a registry string:
 //!
 //! ```nsis
 //! ReadRegStr $4 HKLM "SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-...}" "pv"
 //! ${If} $4 == ""
-//!   ; every install mode lives in here
+//!   ; downloadBootstrapper / embedBootstrapper / offlineInstaller all live here
 //! ```
 //!
 //! Microsoft Edge registers that same client GUID. On a machine where Edge has
@@ -15,19 +16,21 @@
 //! Sandbox image, and anything like it -- the probe finds a version string,
 //! concludes the runtime is present, and provisions nothing. Found on the rig,
 //! 2026-09-21: the bundle "installed" in 1.1s and the app opened a bare window
-//! titled `Error`. No `webviewInstallMode` value avoids it; all three sit
-//! inside that same `${If}`.
+//! titled `Error`.
 //!
-//! So the bundle could not be trusted with the one task it existed for, while
-//! costing a whole install-the-installer step: an Add/Remove Programs entry, a
-//! Start-menu shortcut, a sidecar co-location contract, and an installer that
-//! outlived the product it installed (nothing in `uninstall.rs` removes it).
+//! Three of the four `webviewInstallMode` values are nested inside that
+//! `${If}` and are therefore all skipped together. The exception is
+//! `fixedRuntime`, which ships a runtime alongside the app and never consults
+//! the probe at all -- a real alternative, at roughly 180 MB of shipped
+//! bundle, and the one ARCHITECTURE.md previously recorded as the fallback for
+//! exactly this failure.
 //!
-//! Doing it here instead is strictly better on every axis that matters:
-//! detection is Microsoft's own API rather than a registry guess (injected via
-//! [`Webview2Runner::runtime_available`], since only the GUI crate can call
-//! it), provisioning is the official Evergreen bootstrapper, and the whole
-//! thing works from a portable executable that is never installed.
+//! This module is the other alternative and costs nothing at rest: the app
+//! checks for itself before building a window, and provisions the runtime if
+//! it is genuinely absent. Detection is injected via
+//! [`Webview2Runner::runtime_available`] because only the GUI crate can call
+//! it. In the common case -- a clean registry -- the bundle has already done
+//! the work and this is a no-op.
 //!
 //! SECURITY POSTURE. The bootstrapper is downloaded without a sha256 pin -- it
 //! comes from a redirector that always serves the current build, so no stable
@@ -52,9 +55,20 @@ pub const BOOTSTRAPPER_URL: &str = "https://go.microsoft.com/fwlink/p/?LinkId=21
 /// download, a real signature check, or a real runtime installation.
 pub trait Webview2Runner {
     /// Is the runtime ACTUALLY available? Implemented over Microsoft's
-    /// `GetAvailableCoreWebView2BrowserVersionString` (which is what
-    /// `tauri::webview_version()` calls), never over the EdgeUpdate registry
-    /// key -- reading that key is the bug this module exists to avoid.
+    /// `GetAvailableCoreWebView2BrowserVersionString` (what
+    /// `tauri::webview_version()` calls).
+    ///
+    /// That API VALIDATES the installation rather than merely reading the
+    /// EdgeUpdate registration, which is the difference that matters here: on
+    /// the phantom machine it returned `HRESULT(0x80070002)`, "the system
+    /// cannot find the file specified", where the NSIS probe read the same
+    /// machine's `pv` and concluded the runtime was present. It is not that
+    /// the API ignores the registry -- Microsoft's loader uses those keys to
+    /// locate a runtime -- it is that it then checks the files are there.
+    ///
+    /// Caveat worth knowing: the API also reports preview Edge channels
+    /// (Beta/Dev/Canary) as available, so a machine carrying only Edge Canary
+    /// would be judged provisioned and would run on it.
     fn runtime_available(&self) -> bool;
     /// Fetch the Evergreen bootstrapper to `dest`.
     ///

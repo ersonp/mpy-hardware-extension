@@ -162,10 +162,17 @@ impl blockless_installer_core::webview2::Webview2Runner for RealWebview2Runner {
 /// `embedBootstrapper` and `offlineInstaller` are all nested INSIDE that same
 /// `${If} $4 == ""`, so the probe short-circuits every one. Embedding the
 /// runtime would not have helped; it would just have been skipped too. That
-/// is why both the check AND the provisioning live here rather than in the
-/// bundle -- and why the NSIS bundle was dropped entirely: installing an
-/// installer bought nothing except that broken probe, an Add/Remove Programs
-/// entry, and a sidecar co-location contract.
+/// is why the check and the provisioning live here as well as in the bundle.
+///
+/// The bundle is still how this ships, and still asks NSIS to provision the
+/// runtime: on a machine with a clean registry it does so and this pre-flight
+/// is a no-op. This exists for the machine where the probe is wrong. (A
+/// portable build with no bundle was tried and reverted -- `d783c91` -- because
+/// nothing then points at the uninstaller.)
+///
+/// `fixedRuntime` is the one `webviewInstallMode` that would also avoid the
+/// probe, by shipping a runtime alongside the app at roughly 180 MB. It
+/// remains a live alternative to this module, not a discarded one.
 ///
 /// `tauri::webview_version()` is the right oracle because it does not consult
 /// the registry at all: wry calls Microsoft's own

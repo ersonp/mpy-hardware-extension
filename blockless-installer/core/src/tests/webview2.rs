@@ -13,6 +13,9 @@ struct FakeRunner {
     downloaded: RefCell<Vec<PathBuf>>,
     verified: RefCell<Vec<PathBuf>>,
     ran: RefCell<Vec<PathBuf>>,
+    /// The sequence of calls, so a test can assert that verification precedes
+    /// execution rather than only that both happened.
+    order: RefCell<Vec<&'static str>>,
 }
 
 impl FakeRunner {
@@ -25,6 +28,7 @@ impl FakeRunner {
             downloaded: RefCell::new(Vec::new()),
             verified: RefCell::new(Vec::new()),
             ran: RefCell::new(Vec::new()),
+            order: RefCell::new(Vec::new()),
         }
     }
 }
@@ -40,10 +44,12 @@ impl Webview2Runner for FakeRunner {
     }
     fn download_bootstrapper(&self, dest: &Path) -> Result<(), String> {
         self.downloaded.borrow_mut().push(dest.to_path_buf());
+        self.order.borrow_mut().push("download");
         self.download.clone()
     }
     fn verify_signature(&self, artifact: &Path) -> Result<(), SignatureError> {
         self.verified.borrow_mut().push(artifact.to_path_buf());
+        self.order.borrow_mut().push("verify");
         match &self.signature {
             Ok(()) => Ok(()),
             Err(e) => Err(SignatureError(e.0.clone())),
@@ -51,6 +57,7 @@ impl Webview2Runner for FakeRunner {
     }
     fn run_bootstrapper(&self, exe: &Path) -> Result<(), InstallError> {
         self.ran.borrow_mut().push(exe.to_path_buf());
+        self.order.borrow_mut().push("run");
         match &self.bootstrapper {
             Ok(()) => Ok(()),
             Err(e) => Err(InstallError(e.0.clone())),
@@ -117,6 +124,43 @@ fn a_bad_signature_means_the_bootstrapper_is_never_run() {
     assert!(
         runner.ran.borrow().is_empty(),
         "an unverified artifact must NEVER be executed"
+    );
+}
+
+/// The docs claim a rejected artifact is DELETED, not merely left unrun. That
+/// was asserted nowhere and could not be: the fake creates no file. This test
+/// writes a real file at the path `ensure_webview2` uses, so the cleanup is
+/// observable.
+#[test]
+fn a_rejected_artifact_is_removed_from_disk() {
+    let d = std::env::temp_dir().join(format!("blk-wv2-reject-{}", std::process::id()));
+    std::fs::create_dir_all(&d).unwrap();
+    let artifact = d.join("MicrosoftEdgeWebview2Setup.exe");
+    std::fs::write(&artifact, b"not really microsoft's").unwrap();
+
+    let mut runner = FakeRunner::new(vec![false, false]);
+    runner.signature = Err(SignatureError("not Microsoft".to_string()));
+
+    let _ = ensure_webview2(&runner, &d);
+
+    assert!(
+        !artifact.exists(),
+        "an artifact that failed signature verification must not be left on disk"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Ordering is the security property -- verify BEFORE run. Counts alone cannot
+/// show it, so the fake records the sequence.
+#[test]
+fn verification_happens_before_execution() {
+    let runner = FakeRunner::new(vec![false, true]);
+
+    let _ = ensure_webview2(&runner, &dir("order"));
+
+    assert_eq!(
+        runner.order.borrow().as_slice(),
+        &["download", "verify", "run"]
     );
 }
 

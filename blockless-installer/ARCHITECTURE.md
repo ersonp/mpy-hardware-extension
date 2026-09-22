@@ -206,9 +206,11 @@ decides whether to provision by reading
 `HKLM\...\EdgeUpdate\Clients\{F3017226-...}\pv`. Microsoft Edge registers that same client GUID,
 so on a machine carrying the registration WITHOUT the runtime installed -- a stock Windows Sandbox
 image, and anything like it -- the bundle provisions nothing and the app would open a bare window
-titled `Error`. Found on the rig, 2026-09-21, and no `webviewInstallMode` value avoids it:
-`downloadBootstrapper`, `embedBootstrapper` and `offlineInstaller` all sit inside that same
-`${If}`, so a fixed or offline runtime would have been skipped too.
+titled `Error`. Found on the rig, 2026-09-21. Three of the four `webviewInstallMode` values -- `downloadBootstrapper`,
+`embedBootstrapper` and `offlineInstaller` -- sit inside that same `${If}` and are skipped together.
+The exception is `fixedRuntime`, which ships a runtime alongside the app and never consults the
+probe; at roughly 180 MB of shipped bundle it remains a real alternative to the app-side check
+below, and is what this document previously recorded as the fallback for exactly this failure.
 
 So the app provisions the runtime itself as well (`core/src/webview2.rs`), and that is the
 authoritative path. Detection is Microsoft's `GetAvailableCoreWebView2BrowserVersionString`, reached
@@ -222,8 +224,14 @@ signature, verified before execution through the same Microsoft-pinned `verify_s
 VS Code installer passes. A bad signature deletes the file and never runs it.
 
 In the common case the bundle provisions the runtime at install time and the app's check is a no-op.
-On a machine with a phantom registration the bundle skips it and the app recovers. Neither path
-needs an administrator.
+On a machine with a phantom registration the bundle skips it and the app recovers.
+
+Neither path is *expected* to need an administrator: Microsoft's bootstrapper installs per-user when
+run non-elevated. That has NOT been demonstrated. Every rig run to date executed as Administrator
+(Windows Sandbox does so by default and it cannot be changed), and the resulting registration landed
+under HKLM, i.e. per-machine. Microsoft also documents that a per-user install is replaced by a
+per-machine one where a per-machine Edge Updater is present. The no-admin claim needs a
+non-elevated run on a real machine before it is stated as fact.
 
 ---
 
