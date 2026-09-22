@@ -3,11 +3,41 @@ use crate::profile::CommandRunner;
 use crate::runtime::RuntimeRunner;
 use crate::uninstall::UninstallRunner;
 use crate::vscode::{InstallError, SignatureError, VscodeInstaller};
+use std::ffi::OsStr;
+use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
 pub struct WindowsEnvironment;
+
+/// <https://learn.microsoft.com/windows/win32/procthread/process-creation-flags>
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// A [`Command`] that never pops up a console window.
+///
+/// Every external process this module spawns goes through here, and that is
+/// not cosmetic paranoia. `app/src/main.rs` links the GUI as a Windows GUI
+/// subsystem binary, so the installer owns NO console; Windows therefore
+/// allocates a BRAND NEW console window for any console child it starts. And
+/// `code_cli` resolves to `...\Microsoft VS Code\bin\code.cmd`
+/// (`platform.rs`), a batch file, which Windows runs through `cmd.exe`.
+///
+/// Found on the Windows Sandbox rig, 2026-09-22, immediately after the
+/// `windows_subsystem` fix landed: removing the GUI's own permanent console
+/// turned every `code`, `powershell`, `taskkill` and `uv` call into a black
+/// window flashing up on the user's desktop. The two fixes belong together --
+/// the first one alone trades a persistent console for intermittent ones.
+///
+/// Safe for the CLI too, which links as a console binary: a console child
+/// there had a console to inherit and never opened a window of its own, and
+/// stdio handles are passed explicitly by `Command` regardless, so captured
+/// output (`stdout_of`) and inherited output (`run_ok`) both behave as before.
+fn quiet_command<S: AsRef<OsStr>>(program: S) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
 
 fn run_ok(cmd: &mut Command) -> bool {
     cmd.status().map(|s| s.success()).unwrap_or(false)
@@ -22,7 +52,7 @@ fn stdout_of(cmd: &mut Command) -> Option<String> {
 }
 
 fn powershell(script: &str) -> Command {
-    let mut cmd = Command::new("powershell");
+    let mut cmd = quiet_command("powershell");
     cmd.args(["-NoProfile", "-NonInteractive", "-Command", script]);
     cmd
 }
@@ -48,7 +78,7 @@ impl CommandRunner for WindowsEnvironment {
             .collect()
     }
     fn spawn(&self, code_cli: &Path, args: &[&str]) -> std::io::Result<u32> {
-        Command::new(code_cli).args(args).spawn().map(|c| c.id())
+        quiet_command(code_cli).args(args).spawn().map(|c| c.id())
     }
     fn is_alive(&self, pid: u32) -> bool {
         run_ok(&mut powershell(&format!(
@@ -58,12 +88,12 @@ impl CommandRunner for WindowsEnvironment {
     fn request_graceful_close(&self, pid: u32) {
         // WITHOUT /F: posts WM_CLOSE so VS Code saves window/profile
         // state before exiting (matches M0's Stop-OurCode).
-        let _ = Command::new("taskkill")
+        let _ = quiet_command("taskkill")
             .args(["/PID", &pid.to_string()])
             .status();
     }
     fn force_kill(&self, pid: u32) {
-        let _ = Command::new("taskkill")
+        let _ = quiet_command("taskkill")
             .args(["/PID", &pid.to_string(), "/F"])
             .status();
     }
@@ -74,7 +104,7 @@ impl CommandRunner for WindowsEnvironment {
 
 impl VscodeInstaller for WindowsEnvironment {
     fn version(&self, code_cli: &Path) -> Option<String> {
-        stdout_of(Command::new(code_cli).arg("--version"))
+        stdout_of(quiet_command(code_cli).arg("--version"))
             .and_then(|s| s.lines().next().map(str::to_string))
     }
     fn is_writable(&self, _dir: &Path) -> bool {
@@ -99,7 +129,7 @@ impl VscodeInstaller for WindowsEnvironment {
     }
     fn strip_quarantine(&self, _app_dir: &Path) {}
     fn run_silent_installer(&self, installer_exe: &Path) -> Result<(), InstallError> {
-        if run_ok(Command::new(installer_exe).args([
+        if run_ok(quiet_command(installer_exe).args([
             "/VERYSILENT",
             "/NORESTART",
             "/SUPPRESSMSGBOXES",
@@ -146,7 +176,7 @@ impl VscodeInstaller for WindowsEnvironment {
 
 impl ExtensionsRunner for WindowsEnvironment {
     fn list_extensions(&self, code_cli: &Path, profile_name: &str) -> Option<Vec<String>> {
-        let out = stdout_of(Command::new(code_cli).args([
+        let out = stdout_of(quiet_command(code_cli).args([
             "--profile",
             profile_name,
             "--list-extensions",
@@ -159,7 +189,7 @@ impl ExtensionsRunner for WindowsEnvironment {
         )
     }
     fn install_extension(&self, code_cli: &Path, profile_name: &str, vsix_or_id: &str) -> bool {
-        run_ok(Command::new(code_cli).args([
+        run_ok(quiet_command(code_cli).args([
             "--profile",
             profile_name,
             "--install-extension",
@@ -171,10 +201,10 @@ impl ExtensionsRunner for WindowsEnvironment {
 
 impl RuntimeRunner for WindowsEnvironment {
     fn mpremote_version(&self, envpy: &Path) -> Option<String> {
-        stdout_of(Command::new(envpy).args(["-m", "mpremote", "version"]))
+        stdout_of(quiet_command(envpy).args(["-m", "mpremote", "version"]))
     }
     fn uv_version(&self, uv_bin: &Path) -> Option<String> {
-        stdout_of(Command::new(uv_bin).arg("--version"))
+        stdout_of(quiet_command(uv_bin).arg("--version"))
     }
     fn extract_uv(&self, archive: &Path, dest_dir: &Path) -> Result<(), String> {
         std::fs::create_dir_all(dest_dir).map_err(|e| e.to_string())?;
@@ -194,7 +224,7 @@ impl RuntimeRunner for WindowsEnvironment {
         relocate_binary_if_nested(dest_dir, "uv.exe")
     }
     fn run_uv(&self, uv_bin: &Path, args: &[&str], env: &[(&str, &str)]) -> bool {
-        let mut cmd = Command::new(uv_bin);
+        let mut cmd = quiet_command(uv_bin);
         cmd.args(args);
         for (k, v) in env {
             cmd.env(k, v);
@@ -218,7 +248,7 @@ impl UninstallRunner for WindowsEnvironment {
         if !unins.exists() {
             return Ok(false);
         }
-        if run_ok(Command::new(&unins).args(["/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES"])) {
+        if run_ok(quiet_command(&unins).args(["/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES"])) {
             Ok(true)
         } else {
             Err(format!("{} /VERYSILENT failed", unins.display()))

@@ -22,6 +22,7 @@ use crate::profile;
 use crate::state::State;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// OS-native deletion operations, injected so this is unit-testable without
 /// a real filesystem-tree removal or a real VS Code uninstaller.
@@ -37,6 +38,52 @@ pub trait UninstallRunner {
     /// ran, `Ok(false)` if there's no such uninstaller (caller falls back to
     /// `remove_dir_all`), `Err` if it exists but failed to run.
     fn run_vscode_uninstaller(&self, vscode_dir: &Path) -> Result<bool, String>;
+
+    /// How long to keep re-checking that a removed directory has actually
+    /// disappeared before concluding the removal failed.
+    ///
+    /// Windows keeps a directory entry visible until the last handle to
+    /// anything inside it closes ("delete-pending"), so a tree that WAS
+    /// deleted can still answer `exists() == true` for a moment afterwards.
+    /// Checking once, immediately, reported a failed uninstall on EVERY first
+    /// attempt: found on the Windows Sandbox rig, 2026-09-22, where the same
+    /// snapshot that carried "VS Code could not be fully removed" also showed
+    /// the directory gone. A second uninstall then succeeded with nothing else
+    /// changed. That false failure is not cosmetic -- it trips the
+    /// `!vscode_cleanup_complete` bail-out below, so BLK is left on disk and
+    /// the rest of the uninstall never runs.
+    ///
+    /// Zero means check once and never sleep; the test runners return that, so
+    /// the suite stays fast while production gets real tolerance.
+    fn removal_settle_timeout(&self) -> Duration {
+        Duration::from_secs(10)
+    }
+}
+
+/// `true` once `path` is really gone, re-checking until the runner's
+/// [`UninstallRunner::removal_settle_timeout`] elapses.
+///
+/// Returns immediately when the path is already absent, so the common case
+/// costs nothing. Only a genuinely surviving directory pays the full wait,
+/// and that one deserves to.
+///
+/// This is the same delete-pending phenomenon the rig documentation warns
+/// observers about -- "sampling 'is it gone?' immediately after uninstall
+/// returns is not a measurement". It applies just as much to the code doing
+/// the removing, where being fooled changes behaviour rather than merely
+/// misleading a reader.
+fn removal_settled(runner: &dyn UninstallRunner, path: &Path) -> bool {
+    if !path.exists() {
+        return true;
+    }
+    let deadline = Instant::now() + runner.removal_settle_timeout();
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(250));
+        if !path.exists() {
+            return true;
+        }
+    }
+    !path.exists()
 }
 
 /// `^[A-Za-z0-9_-]+$`, hand-rolled (no regex dependency for one allowlist
@@ -71,7 +118,7 @@ fn write_atomic(dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// Silent on any failure (missing, unreadable, unparseable, wrong shape) --
 /// the invariant guard right after this is what actually enforces safety,
 /// not this function's return value (it has none).
-fn remove_storage_entry(storage_path: &Path, profile_name: &str) {
+fn remove_storage_entry(storage_path: &Path, profile_name: &str, profile_location: &str) {
     let Some(mut root) = read_storage(storage_path) else {
         return;
     };
@@ -86,10 +133,51 @@ fn remove_storage_entry(storage_path: &Path, profile_name: &str) {
     } else {
         return;
     }
+    remove_profile_associations(obj, profile_location);
     let Ok(body) = serde_json::to_vec_pretty(&root) else {
         return;
     };
     let _ = write_atomic(storage_path, &body);
+}
+
+/// Drop every window/workspace association pointing at our profile.
+///
+/// These live beside `userDataProfiles` and key off the profile's LOCATION
+/// (`"blockless"`), not its display name (`"Blockless"`):
+///
+/// ```json
+/// "profileAssociations": {
+///   "workspaces":   { "<workspace uri>": "blockless" },
+///   "emptyWindows": { "<window id>":     "blockless" }
+/// }
+/// ```
+///
+/// Found on the Windows Sandbox rig, 2026-09-22. An install writes THREE
+/// pieces of state -- the `userDataProfiles` entry, the `profiles/<loc>/`
+/// directory, and these associations -- and the uninstall removed only the
+/// first two. What survived a fully successful uninstall was a dangling
+/// association naming a profile that no longer existed. The acceptance
+/// checklist's step 8 calls this out exactly: "the entry and the directory
+/// are two removals, so an orphan survives while everything else looks gone".
+/// There are three.
+///
+/// Best-effort and shape-tolerant, like its caller: a missing or oddly-shaped
+/// `profileAssociations` is simply left alone. It is NOT wired into
+/// [`storage_entry_confirmed_absent`], so a failure to prune here can never
+/// trip the invariant guard and abort an otherwise good uninstall -- a stale
+/// association is untidy, not dangerous.
+fn remove_profile_associations(obj: &mut serde_json::Map<String, Value>, profile_location: &str) {
+    let Some(assoc) = obj
+        .get_mut("profileAssociations")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    for key in ["workspaces", "emptyWindows"] {
+        if let Some(map) = assoc.get_mut(key).and_then(Value::as_object_mut) {
+            map.retain(|_, v| v.as_str() != Some(profile_location));
+        }
+    }
 }
 
 /// Fail-closed: `true` only when we can POSITIVELY confirm the entry is
@@ -207,7 +295,7 @@ pub fn uninstall(
 
     let mut profile_removed = false;
     if profile_created_by_us {
-        remove_storage_entry(storage_path, profile_name);
+        remove_storage_entry(storage_path, profile_name, &profile_location);
 
         let loc_safe = is_safe_location(&profile_location);
         if loc_safe {
@@ -255,8 +343,14 @@ pub fn uninstall(
             }
             any_existed = true;
             let removed = match runner.run_vscode_uninstaller(vscode_dir) {
-                Ok(true) => !vscode_dir.exists(),
-                Ok(false) => runner.remove_dir_all(vscode_dir).is_ok() && !vscode_dir.exists(),
+                // `removal_settled`, not a bare `exists()`: VS Code's own
+                // `unins000.exe` can return before its work is visible, and
+                // Windows keeps the directory entry until the last handle
+                // closes either way.
+                Ok(true) => removal_settled(runner, vscode_dir),
+                Ok(false) => {
+                    runner.remove_dir_all(vscode_dir).is_ok() && removal_settled(runner, vscode_dir)
+                }
                 Err(_) => false,
             };
             all_removed &= removed;
@@ -287,7 +381,9 @@ pub fn uninstall(
 
     let (blk_removed, blk_removal_partial) = if blk.exists() {
         let attempted = runner.remove_dir_all(blk);
-        if attempted.is_ok() && !blk.exists() {
+        // Same delete-pending tolerance as the VS Code removal above: without
+        // it, a successful BLK delete can report `blk_removal_partial`.
+        if attempted.is_ok() && removal_settled(runner, blk) {
             (true, false)
         } else {
             (false, true)

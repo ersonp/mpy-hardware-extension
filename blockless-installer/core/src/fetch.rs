@@ -172,6 +172,57 @@ pub fn fetch_and_verify(
     Ok(())
 }
 
+/// GET `url` and return the body as text, retried under the SAME policy as
+/// [`fetch_and_verify`]'s downloads (`FetchOptions::max_attempts`, exponential
+/// backoff from `backoff_base`).
+///
+/// Exists because the VS Code update-API request was a single unretried
+/// `client.get(url).send()` in `vscode.rs`, while the download it gates got
+/// the full retry treatment. Found on the Windows Sandbox rig, 2026-09-21:
+/// one transient DNS/NAT blip on a freshly booted machine surfaced to the user
+/// as a first-run failure screen, and a manual retry cleared it. A cold
+/// machine with slow DHCP is exactly the profile a one-click installer runs
+/// on, so the request that gates the whole install must be at least as robust
+/// as the download that follows it.
+///
+/// No watchdog thread here, unlike [`retry::fetch_with_retry`]: that exists to
+/// bound a stalled multi-hundred-megabyte streaming body, and this reads a
+/// small JSON document. The client's own timeouts cover it.
+///
+/// **A 4xx is never retried.** A client error is a fact about the request, not
+/// a transient, and retrying it would just burn the whole backoff budget
+/// before reporting the same thing -- the same reasoning that makes a sha256
+/// mismatch a hard failure rather than a retry.
+pub fn get_text_with_retry(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    opts: &FetchOptions,
+) -> Result<String, reqwest::Error> {
+    let attempts = opts.max_attempts.max(1);
+    let mut last: Option<reqwest::Error> = None;
+    for attempt in 0..attempts {
+        match client
+            .get(url)
+            .send()
+            .and_then(|r| r.error_for_status())
+            .and_then(|r| r.text())
+        {
+            Ok(body) => return Ok(body),
+            Err(e) => {
+                let client_error = e.status().is_some_and(|s| s.is_client_error());
+                last = Some(e);
+                if client_error {
+                    break;
+                }
+                if attempt + 1 < attempts {
+                    std::thread::sleep(opts.backoff_for(attempt));
+                }
+            }
+        }
+    }
+    Err(last.expect("the loop body runs at least once and only exits via Ok or Some(e)"))
+}
+
 #[cfg(not(windows))]
 fn replace_atomic(tmp: &Path, dest: &Path) -> std::io::Result<()> {
     std::fs::rename(tmp, dest)
