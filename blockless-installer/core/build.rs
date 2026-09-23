@@ -14,11 +14,11 @@
 //! is the normal state for a developer build and exactly what you want to see
 //! in a bug report from one.
 //!
-//! STALENESS CAVEAT: the `rerun-if-changed` lines below cover the common cases
-//! (committing, switching branches), but cargo cannot be told to re-run on
-//! "any tracked file changed". A build whose only change is an uncommitted
-//! edit to another crate can therefore carry a slightly stale `-dirty` sha.
-//! It identifies the commit, not the exact bytes; for a release, build from a
+//! RE-RUNS on commits and checkouts (`.git/HEAD`, refs), on staging
+//! (`.git/index`), and on edits to the source of every crate that links this
+//! one (`core`, `cli`, `app`), so a rebuild after an uncommitted edit picks up
+//! `-dirty`. Edits outside those trees can still leave the flag stale: it
+//! identifies the commit, not the exact bytes; for a release, build from a
 //! clean tree and tag it.
 
 use std::process::Command;
@@ -28,12 +28,19 @@ fn main() {
     // is updated. Paths are relative to this crate's manifest directory.
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/refs/heads");
+    println!("cargo:rerun-if-changed=../../.git/index");
+    // Source trees, not the crate roots: `target/` lives beside them and
+    // would make every build re-run this.
+    for dir in ["src", "../cli/src", "../app/src", "../app/ui"] {
+        println!("cargo:rerun-if-changed={dir}");
+    }
 
     let sha = git(&["rev-parse", "--short=12", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
     let dirty = match git(&["status", "--porcelain"]) {
         Some(out) if !out.trim().is_empty() => "-dirty",
         Some(_) => "",
         // Could not ask git at all: say so rather than implying a clean tree.
+        None if sha != "unknown" => "-status-unknown",
         None => "",
     };
     println!("cargo:rustc-env=BLOCKLESS_GIT_SHA={sha}{dirty}");

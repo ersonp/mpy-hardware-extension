@@ -192,13 +192,20 @@ fn preflight_webview2() {
         "Blockless Installer needs the Microsoft Edge WebView2 runtime, and it is not \
          installed on this PC.\n\n\
          Install it now?\n\n\
-         It downloads about 2 MB from Microsoft, installs for your user account only, \
-         and does not need an administrator.",
+         It downloads the runtime from Microsoft (usually over 100 MB), which can take \
+         a few minutes. Nothing is shown while it works: this installer opens when it \
+         is done. Windows may ask for administrator permission.",
     ) {
         std::process::exit(1);
     }
 
-    let outcome = ensure_webview2(&RealWebview2Runner, &std::env::temp_dir());
+    // A directory of this process's own, not bare `%TEMP%`: a user who thinks
+    // the silent download hung and launches again must not have the second
+    // process overwrite, or delete, the file the first is about to run.
+    let download_dir =
+        std::env::temp_dir().join(format!("blockless-webview2-{}", std::process::id()));
+    let outcome = ensure_webview2(&RealWebview2Runner, &download_dir);
+    let _ = std::fs::remove_dir_all(&download_dir);
     match outcome {
         Webview2Outcome::AlreadyPresent | Webview2Outcome::Installed => {}
         Webview2Outcome::RanButStillMissing => {

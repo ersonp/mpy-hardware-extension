@@ -140,16 +140,14 @@ async fn run_op(
 /// answers it by showing the one they actually care about, rather than making
 /// the two artifacts share a version they do not share a lifecycle with.
 ///
-/// `None` on any failure, and the UI simply omits the text. A missing sidecar
-/// is already reported loudly by the first Install click, naming every path
-/// searched; repeating it as a startup error would be noise, and must never
-/// be mistaken for the machine being unusable.
+/// `Err` carries the reason to the window, which logs it and omits the text.
+/// A missing sidecar is already reported loudly by the first Install click,
+/// naming every path searched; repeating it as a startup error would be noise,
+/// and must never be mistaken for the machine being unusable.
 #[tauri::command]
-pub(crate) async fn extension_version(app: tauri::AppHandle) -> Option<String> {
+pub(crate) async fn extension_version(app: tauri::AppHandle) -> Result<String, String> {
     let resource_dir = bundle_resource_dir(&app);
-    load_manifest_and_vsix(resource_dir)
-        .ok()
-        .map(|(manifest, _)| manifest.components.extension.version)
+    load_manifest_and_vsix(resource_dir).map(|(manifest, _)| manifest.components.extension.version)
 }
 
 #[tauri::command]

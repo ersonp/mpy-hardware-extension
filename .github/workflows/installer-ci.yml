@@ -218,17 +218,18 @@ jobs:
       # that breaks the ARM64 Windows target without waiting for someone to
       # have the hardware.
       #
-      # SCOPE, precisely: core + cli ONLY. `app/` is excluded from this
-      # workspace (see ../Cargo.toml) and is NOT covered here: cross-checking it
-      # for this target fails in `cc-rs` with "failed to find tool clang",
-      # measured on a developer machine 2026-09-22. Whether `windows-latest`
-      # would fare better is UNVERIFIED -- that image may well ship LLVM -- so
-      # this is a gap worth revisiting, not a closed door. As it stands the GUI
-      # crate is compiled for arm64 nowhere.
+      # SCOPE: core + cli, and app/ (checked by manifest path, since it is
+      # excluded from this workspace -- see ../Cargo.toml). All three need the
+      # same C toolchain for this target: core pulls in `ring` through
+      # reqwest's rustls, and ring's build needs clang just as app/'s does. A
+      # developer machine without the arm64 MSVC tools fails on core too
+      # (2026-09-22); `windows-latest` has them, so nothing here needs
+      # excluding.
       #
       # And this proves compilation, nothing more. scripts/NOTES.md holds what
       # the arch coverage table actually claims.
-      - name: arm64 windows target still compiles (core + cli only)
+      - name: arm64 windows target still compiles (core + cli + app)
         run: |
           rustup target add aarch64-pc-windows-msvc
           cargo check --workspace --target aarch64-pc-windows-msvc
+          cargo check --manifest-path app/Cargo.toml --target aarch64-pc-windows-msvc

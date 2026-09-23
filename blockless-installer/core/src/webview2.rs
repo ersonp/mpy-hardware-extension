@@ -129,16 +129,17 @@ pub fn ensure_webview2(runner: &dyn Webview2Runner, download_dir: &Path) -> Webv
         ));
     }
 
-    if let Err(e) = runner.run_bootstrapper(&dest) {
-        let _ = std::fs::remove_file(&dest);
-        return Webview2Outcome::Failed(format!("the WebView2 installer failed: {e}"));
-    }
+    let ran = runner.run_bootstrapper(&dest);
     let _ = std::fs::remove_file(&dest);
 
-    if runner.runtime_available() {
-        Webview2Outcome::Installed
-    } else {
-        Webview2Outcome::RanButStillMissing
+    // The exit code is not the verdict in EITHER direction. A non-zero exit
+    // can still leave a usable runtime (a per-machine install or Edge Updater
+    // satisfied it, a "reboot recommended" code), and refusing to start on a
+    // machine that now works would be the same mistake as trusting a zero.
+    match (ran, runner.runtime_available()) {
+        (_, true) => Webview2Outcome::Installed,
+        (Ok(()), false) => Webview2Outcome::RanButStillMissing,
+        (Err(e), false) => Webview2Outcome::Failed(format!("the WebView2 installer failed: {e}")),
     }
 }
 

@@ -65,11 +65,11 @@ impl UninstallOutcome {
             } => (
                 false,
                 format!(
-                    "VS Code could not be fully removed, so nothing else was deleted. Your \
-                     Blockless folder is still on disk and this installer still knows it owns \
-                     it, so running Uninstall again will finish the job.{}",
+                    "VS Code could not be fully removed, so the uninstall stopped before \
+                     deleting your Blockless folder. It is still on disk and this installer \
+                     still knows it owns it, so running Uninstall again will finish the job.{}",
                     if *profile_removed {
-                        " The Blockless editor profile was removed."
+                        " The Blockless editor profile was removed before that."
                     } else {
                         " The Blockless editor profile was not removed either."
                     }
@@ -101,12 +101,20 @@ impl UninstallOutcome {
                 if *vscode_removed {
                     removed.push("VS Code");
                 }
+                // Leftover files make "Uninstalled." and "nothing left to
+                // remove" untrue, so a partial removal changes the lead too.
+                let lead = if *blk_removal_partial {
+                    "Partly uninstalled."
+                } else {
+                    "Uninstalled."
+                };
                 let mut message = match removed.len() {
-                    0 => "Uninstalled. There was nothing left to remove.".to_string(),
-                    1 => format!("Uninstalled. Removed {}.", removed[0]),
+                    0 if *blk_removal_partial => lead.to_string(),
+                    0 => format!("{lead} There was nothing left to remove."),
+                    1 => format!("{lead} Removed {}.", removed[0]),
                     _ => {
                         let last = removed.pop().expect("len >= 2");
-                        format!("Uninstalled. Removed {} and {last}.", removed.join(", "))
+                        format!("{lead} Removed {} and {last}.", removed.join(", "))
                     }
                 };
                 if *blk_removal_partial {

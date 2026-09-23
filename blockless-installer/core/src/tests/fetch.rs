@@ -642,6 +642,23 @@ fn get_text_does_not_retry_a_4xx() {
     );
 }
 
+/// 408 and 429 are the transient 4xx codes: a rate-limited classroom must get
+/// the backoff, not a failure screen on the first attempt.
+#[test]
+fn get_text_retries_a_408_and_a_429() {
+    let server = TestServer::start(vec![
+        (429, vec![]),
+        (408, vec![]),
+        (200, b"{\"ok\":true}".to_vec()),
+    ]);
+    let client = reqwest::blocking::Client::new();
+
+    let body = get_text_with_retry(&client, &server.url(), &fast_opts(3)).unwrap();
+
+    assert_eq!(body, "{\"ok\":true}");
+    assert_eq!(server.hits(), 3);
+}
+
 #[test]
 fn get_text_exhausts_its_attempts_and_reports_the_last_error() {
     let server = TestServer::start(vec![(503, vec![]), (503, vec![]), (503, vec![])]);

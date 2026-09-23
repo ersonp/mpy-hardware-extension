@@ -241,10 +241,13 @@ pub fn download_unverified(
 /// JSON document -- applying it to a download would cap the transfer, which is
 /// exactly what `download_client` refuses to do.
 ///
-/// **A 4xx is never retried.** A client error is a fact about the request, not
-/// a transient, and retrying it would just burn the whole backoff budget
-/// before reporting the same thing -- the same reasoning that makes a sha256
-/// mismatch a hard failure rather than a retry.
+/// **A 4xx is not retried**, except 408 Request Timeout and 429 Too Many
+/// Requests. A client error is a fact about the request, not a transient, and
+/// retrying it would just burn the whole backoff budget before reporting the
+/// same thing -- the same reasoning that makes a sha256 mismatch a hard
+/// failure rather than a retry. 408 and 429 are the two 4xx codes that are
+/// transient by definition: a classroom installing at once is exactly who gets
+/// rate-limited.
 pub fn get_text_with_retry(
     client: &reqwest::blocking::Client,
     url: &str,
@@ -277,7 +280,11 @@ pub fn get_text_with_retry(
         {
             Ok(body) => return Ok(body),
             Err(e) => {
-                let client_error = e.status().is_some_and(|s| s.is_client_error());
+                let client_error = e.status().is_some_and(|s| {
+                    s.is_client_error()
+                        && s != reqwest::StatusCode::REQUEST_TIMEOUT
+                        && s != reqwest::StatusCode::TOO_MANY_REQUESTS
+                });
                 // Logged per failed attempt, so a retry that SUCCEEDS still
                 // leaves evidence it happened: without this line a transient
                 // the retry absorbed is indistinguishable from one that never

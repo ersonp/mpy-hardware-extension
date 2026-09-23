@@ -524,6 +524,37 @@ fn summary_marks_every_outcome_the_user_must_act_on_as_not_ok() {
     );
 }
 
+/// Two sentences of one message must not contradict each other: a partial
+/// removal is neither "Uninstalled." nor "nothing left to remove", and a VS
+/// Code failure after the profile went is not "nothing else was deleted".
+#[test]
+fn summary_never_contradicts_itself() {
+    let partial = UninstallOutcome::Finished {
+        profile_removed: false,
+        blk_removed: false,
+        blk_removal_partial: true,
+        vscode_removed: false,
+        invariant_guard_tripped: false,
+        vscode_kept_but_owned: false,
+        vscode_removal_failed: false,
+    }
+    .summary("HINT");
+    assert!(
+        !partial.message.contains("nothing left to remove")
+            && !partial.message.starts_with("Uninstalled."),
+        "{}",
+        partial.message
+    );
+    assert!(partial.message.contains("could not be deleted"));
+
+    let failed = finished(false, true, false).summary("HINT");
+    assert!(
+        !failed.message.contains("nothing else was deleted"),
+        "the profile WAS deleted in this outcome: {}",
+        failed.message
+    );
+}
+
 /// The ownership note ends with whatever the shell can actually offer: the
 /// CLI names its `--all` flag, the GUI has no flags and must not name one.
 #[test]

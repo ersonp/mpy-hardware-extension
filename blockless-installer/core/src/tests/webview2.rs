@@ -194,6 +194,19 @@ fn an_installer_that_fails_is_reported() {
     }
 }
 
+/// A non-zero exit is not the verdict either: if the runtime is there
+/// afterwards, the installer must start rather than refuse on a working PC.
+#[test]
+fn an_installer_that_exits_non_zero_but_leaves_a_runtime_counts_as_installed() {
+    let mut runner = FakeRunner::new(vec![false, true]);
+    runner.bootstrapper = Err(InstallError("exit 3010".to_string()));
+
+    assert_eq!(
+        ensure_webview2(&runner, &dir("nonzero-ok")),
+        Webview2Outcome::Installed
+    );
+}
+
 /// Availability is re-checked AFTER the installer runs rather than trusting
 /// its exit code -- the same "confirm, do not assume" lesson the uninstall
 /// learned. An installer that reports success while leaving no runtime is a
